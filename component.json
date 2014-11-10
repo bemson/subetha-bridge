@@ -15,7 +15,7 @@
     "bemson/morus": "1.*"
   },
   "development": {},
-  "license": "MIT",
+  "license": "Apache-2.0",
   "main": "src/subetha-bridge.js",
   "scripts": [
     "src/subetha-bridge.js"
