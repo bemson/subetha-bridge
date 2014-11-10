@@ -1,0 +1,27 @@
+{
+  "name": "subetha-bridge",
+  "version": "0.0.0-alpha",
+  "description": "Host SubEtha clients and messages",
+  "main": "src/subetha-bridge.js",
+  "dependencies": {
+    "morus": "1.x"
+  },
+  "keywords": [
+    "subetha",
+    "relay",
+    "bridge",
+    "messaging",
+    "events",
+    "pubsub"
+  ],
+  "author": {
+    "name": "Bemi Faison",
+    "email": "bemson@gmail.com",
+    "url": "https://github.com/bemson"
+  },
+  "repository": {
+    "type": "git",
+    "url": "http://github.com/bemson/subetha-bridge.git"
+  },
+  "licenses": ["MIT"]
+}
