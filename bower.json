@@ -28,6 +28,7 @@
     "components",
     "README.md",
     "LICENSE",
+    "public_bridge.html",
     "subetha-bridge.min.js"
   ]
 }
