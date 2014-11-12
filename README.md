@@ -11,7 +11,8 @@ SubEtha-Bridge (or Bridge) is a supporting library within the SubEtha messaging 
 
 Bridges primarily implement the SubEtha protocol for communicating with Clients, and require zero configuration. Some security, monitoring and bootstrapping options are available.
 
-**Note:** Please see the [Subetha (Client) project page](), for important background information, plus development, implementation, and security considerations.
+**Note:** Please see the [SubEtha project page](https://github.com/bemson/subetha), for important background information, plus development, implementation, and security considerations.
+
 
 ## Usage
 
@@ -164,7 +165,7 @@ SBridge.on('auth', function (req) {
 
 Message-relay requests can only be handled in the order they are received. When a request is suspended, it is passed to subscribers of the "relay" event, and set in the `SBridge.pendingRelay` namespace.
 
-It's important to consider latency, when processing a relay request. More message-relay requests will pile up as you perform your logic, which can perceived performance of your bridge. Try to handle message-relay requests immediately, instead of asynchronously.
+It's important to consider latency, when processing a relay request. More message-relay requests will pile up as you perform your logic, which can reduce perceived performance of your bridge. Try to handle message-relay requests immediately, instead of asynchronously.
 
 Below, demonstrates logic that prevents broadcast messages - messages without a recipient.
 
