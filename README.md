@@ -2,7 +2,7 @@
 
 Host SubEtha clients and messages
 
-version 0.0.2-alpha
+version 0.0.3-alpha
 by Bemi Faison
 
 ## Description
