@@ -1,7 +1,7 @@
 /*jshint -W056 */
 /* global define, require, module */
 /*!
- * SubEtha-Bridge v0.0.0-alpha
+ * SubEtha-Bridge
  * http://github.com/bemson/subetha-bridge/
  *
  * Copyright 2014 Bemi Faison
