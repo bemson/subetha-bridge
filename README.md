@@ -33,6 +33,12 @@ Below demonstrates a complete bridge implementation that you could host on any s
 </html>
 ```
 
+#### Redirecting Bridge urls
+
+You may redirect the browser from your initial bridge url as necessary. This is recommended if you want to obfuscate or gate access to your bridge - e.g., by referrer. The SubEtha-Client module simply attempts to bootstrap every redirected page until a connection is established.
+
+However if more than 10 seconds pass (the default threshold), the client will remove the iframe that hosted the (original) destination.
+
 #### Connecting to your Bridge
 
 If the url to your bridge were `http://my.site.com/bridge.html`, clients could then connect to it in their applications, like so:
