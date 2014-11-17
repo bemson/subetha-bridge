@@ -1,6 +1,6 @@
 {
   "name": "subetha-bridge",
-  "version": "0.0.3-alpha",
+  "version": "0.0.4-alpha",
   "description": "Host SubEtha clients and messages",
   "main": "src/subetha-bridge.js",
   "dependencies": {
