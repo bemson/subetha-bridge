@@ -66,9 +66,12 @@ SubEtha Message Bus (se-msg)
       bridgeId = guid(),
       bridgeNetworkName,
 
-      // security
+      // initialization
       initialized = 0,
       destroyed = 0,
+
+
+      // security
       backtick = '`',
       lastStamp,
       host = scope.parent,
@@ -94,6 +97,14 @@ SubEtha Message Bus (se-msg)
       // versioned localstorage keys
       netKey = protocolVersion + '-net',
       msgKey = protocolVersion + '-msg',
+
+      // ie local storage workaround
+      isIE910 = /msie\s[91]/i.test(navigator.userAgent),
+      isIE11 = !isIE910 && /trident/i.test(navigator.userAgent),
+      ieTickValue = 0,
+      ieTickKey,
+      ie11Timer,
+      ie11LastVal,
 
       // network tracking
       networkClients = {},
@@ -191,7 +202,13 @@ SubEtha Message Bus (se-msg)
         function (object, eventName, callback) {
           object.removeEventListener(eventName, callback, false);
         },
-
+      // perform key hinting for ie9 & 10
+      broadcast = isIE910 ?
+        function (type, msg) {
+          LS.setItem(ieTickKey, ++ieTickValue + '');
+          _broadcast(type, msg);
+        } :
+        _broadcast,
 
       postMessageCommands = {
 
@@ -485,8 +502,19 @@ SubEtha Message Bus (se-msg)
 
           // stop listening for client commands
           unbind(scope, 'message', postMessageRouter);
-          // stop listening for local storage commands
-          unbind(scope, 'storage', localStorageRouter);
+
+          // stop monitoring localStorage
+          if (isIE910) {
+            // listen for name change
+            unbind(document, 'storage', ie910CheckForChange);
+          } else if (isIE11) {
+            // watch local storage
+            clearInterval(ie11Timer);
+          } else {
+            // stop listening for local storage commands
+            unbind(scope, 'storage', localStorageRouter);
+          }
+
           // stop listening for unload
           unbind(scope, 'unload', bridge.destroy);
 
@@ -600,8 +628,18 @@ SubEtha Message Bus (se-msg)
 
             // listen for client commands
             bind(scope, 'message', postMessageRouter);
-            // listen for network commands
-            bind(scope, 'storage', localStorageRouter);
+
+            // monitor localStorage
+            if (isIE910) {
+              // listen for name change
+              bind(document, 'storage', ie910CheckForChange);
+            } else if (isIE11) {
+              // watch local storage
+              ie11Timer = setInterval(ie11CheckForChange, 1);
+            } else {
+              // otherwise listen as normal and hope for the best
+              bind(scope, 'storage', localStorageRouter);
+            }
 
             // note that we're initialized
             bridge.fire(INITIALIZE_EVENT);
@@ -780,6 +818,36 @@ SubEtha Message Bus (se-msg)
 
     // FUNCTIONS
 
+    // check if set has incremented
+    function ie910CheckForChange() {
+      var currentTickValue = LS.getItem(ieTickKey);
+
+      // exit if no value
+      if (!currentTickValue) {
+        return;
+      }
+      // convert value to number
+      currentValue *= 1;
+      // if greater tick
+      if (currentTickValue != ieTickValue) {
+        // broadcast value msgKey as an event
+        localStorageRouter({
+          key: msgKey,
+          newValue: LS.getItem(msgKey)
+        });
+      }
+      ieTickValue = currentTickValue;
+    }
+
+    function ie11CheckForChange() {
+      var currentValue = LS.getItem(msgKey);
+      if (currentValue != ie11LastVal) {
+        // broadcast value msgKey as an event
+        localStorageRouter({key:msgKey, newValue: currentValue});
+        ie11LastVal = currentValue;
+      }
+    }
+
     function resolveNetworkChannel(channelName) {
       if (!protoHas.call(networkChannels, channelName)) {
         networkChannels[channelName] = {};
@@ -797,7 +865,7 @@ SubEtha Message Bus (se-msg)
     }
 
     // share message with network
-    function broadcast(type, msg) {
+    function _broadcast(type, msg) {
       LS.setItem(msgKey, storagePfx + lastStamp + JSONstringify({
         type: type,
         bid: bridgeId,
@@ -1033,6 +1101,10 @@ SubEtha Message Bus (se-msg)
             allClients.push(channel[clientId]);
           }
         }
+        if (isIE910) {
+          // clear tick key - so ie9 & 10 don't asses the change as a message to process
+          LS.setItem(ieTickKey, '');
+        }
         // store network channels
         LS.setItem(netKey, JSONstringify(allClients));
 
@@ -1245,7 +1317,7 @@ SubEtha Message Bus (se-msg)
       // second security
       if (
         // not an object
-        typeof msg !== 'object' ||
+        typeof msg != 'object' ||
         // message has no msg property
         !protoHas.call(msg, 'msg') ||
         // there is no handler for this message
