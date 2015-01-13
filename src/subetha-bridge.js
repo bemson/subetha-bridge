@@ -164,7 +164,7 @@ SubEtha Message Bus (se-msg)
       next =
         // use setImmediate
         (
-          typeof setImmediate === 'function' &&
+          typeof setImmediate == 'function' &&
           setImmediate
         ) ||
         // use nextTick (for nodeJS only)
@@ -216,7 +216,7 @@ SubEtha Message Bus (se-msg)
           // only queue if client event has proper structure
           if (
             // msg is an object
-            typeof msg === 'object' &&
+            typeof msg == 'object' &&
             // type is a string
             isFullString(msg.type) &&
             // comes from a registered client
@@ -617,7 +617,7 @@ SubEtha Message Bus (se-msg)
 
           if (
             isFullString(evt) &&
-            typeof callback === 'function'
+            typeof callback == 'function'
           ) {
             if (!protoHas.call(me, '_evts')) {
               // init events hash
@@ -761,7 +761,7 @@ SubEtha Message Bus (se-msg)
 
     // quick check for non-zero length strings
     function isFullString(value) {
-      return value && typeof value === 'string';
+      return value && typeof value == 'string';
     }
 
     // return a random number of random characters, excluding "{", "|", and "}"
@@ -1107,7 +1107,7 @@ SubEtha Message Bus (se-msg)
       networkClientsCnt--;
 
       // if this is the last client in the channel
-      if (networkChannelCnts[channelName] === 1) {
+      if (networkChannelCnts[channelName] == 1) {
         // remove channel
         delete networkChannels[channelName];
         // remove channel tally
@@ -1136,7 +1136,7 @@ SubEtha Message Bus (se-msg)
       delete joinQueue[clientId];
 
       // if this is the last client in the bridge channel
-      if (bridgeChannelCnts[channelName] === 1) {
+      if (bridgeChannelCnts[channelName] == 1) {
         // remove bridge group
         delete bridgeChannels[channelName];
         // remove bridge group count tally
@@ -1165,7 +1165,7 @@ SubEtha Message Bus (se-msg)
       // parser
       if (
         !canPostObjects &&
-        cmdType === 'string'
+        cmdType == 'string'
       ) {
         // assess json before parsing
         if (r_validClientMsg.test(cmd)) {
@@ -1191,7 +1191,7 @@ SubEtha Message Bus (se-msg)
           // trust regexp test or...
           securedByRegExp || (
             // matches key - this supplements origin security
-            cmd.key === speakerKey &&
+            cmd.key == speakerKey &&
             // has a message identifier
             isFullString((mid = cmd.mid)) &&
             // has a message
@@ -1315,7 +1315,7 @@ SubEtha Message Bus (se-msg)
         msgHost('auth', {
           id: me.client.id,
           ok: false,
-          code: typeof reason === 'string' ? reason : ''
+          code: typeof reason == 'string' ? reason : ''
         });
 
       },
