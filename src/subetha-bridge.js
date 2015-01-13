@@ -1162,7 +1162,7 @@ SubEtha Message Bus (se-msg)
         code = CLIENT_RSP_MISSING_COMMAND;
 
       // capture to cache-bust db changes
-      lastStamp = evt.timeStamp;
+      lastStamp = evt.timeStamp || new Date() * 1;
 
       // parser
       if (
