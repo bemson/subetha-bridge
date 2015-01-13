@@ -146,7 +146,9 @@ SubEtha Message Bus (se-msg)
               yes = 0;
             }
           }, '*');
-        } catch (e) {}
+        } catch (e) {
+          yes = 0;
+        }
 
         return yes;
       }(),
