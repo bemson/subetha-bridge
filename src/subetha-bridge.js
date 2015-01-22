@@ -45,12 +45,18 @@ SubEtha Message Bus (se-msg)
       // externals
       cipher = new ((inCJS || inAMD) ? require('morus') : scope.Morus)(),
 
-      // builtins
+      // builtins & shorthand
       JSONstringify = JSON.stringify,
       JSONparse = JSON.parse,
       LS = localStorage,
       mathRandom = Math.random,
+      isArray = (typeof Array.isArray === 'function') ?
+        Array.isArray :
+        function (obj) {
+          return obj instanceof Array;
+        },
       stringfromCharCode = String.fromCharCode,
+      doc = document,
 
       // prototype aliases
       protoSlice = Array.prototype.slice,
@@ -85,7 +91,7 @@ SubEtha Message Bus (se-msg)
       origin = location.origin || location.protocol + '//' + (location.port ? location.port + ':' : '') + location.hostname,
       storagePfx = protocolVersion + backtick + bridgeId + backtick,
       unsupported =
-        // the parent is this window
+        // not in an iframe
         host === scope ||
         // has no postmessage
         typeof host.postMessage != 'function' ||
@@ -94,17 +100,26 @@ SubEtha Message Bus (se-msg)
         typeof LS.getItem != 'function' ||
         typeof LS.setItem != 'function',
 
-      // versioned localstorage keys
-      netKey = protocolVersion + '-net',
-      msgKey = protocolVersion + '-msg',
-
       // ie local storage workaround
       isIE910 = /msie\s[91]/i.test(navigator.userAgent),
       isIE11 = !isIE910 && /trident/i.test(navigator.userAgent),
+      isIE = isIE910 || isIE11,
+      ie11ManifestTimer,
+      ieManifest,
+      ieCookieIndexSearchStr,
+      ieCookieSetStr,
+      ieCookieRemoveStr,
       ieTickValue = 0,
-      ieTickKey,
-      ie11Timer,
-      ie11LastVal,
+      ieBridgeTicks,
+      ieMsgTimer,
+      ieLastMsgTime = 0,
+      ieMsgDelay = 30,
+
+      // localstorage keys
+      netKeySuffix = '-net',
+      msgKeySuffix = '-msg',
+      netKey = (isIE ? bridgeId : protocolVersion) + netKeySuffix,
+      msgKey = (isIE ? bridgeId : protocolVersion) + msgKeySuffix,
 
       // network tracking
       networkClients = {},
@@ -202,13 +217,28 @@ SubEtha Message Bus (se-msg)
         function (object, eventName, callback) {
           object.removeEventListener(eventName, callback, false);
         },
-      // perform key hinting for ie9 & 10
-      broadcast = isIE910 ?
+
+      queueNetworkRelay = isIE ?
         function (type, msg) {
-          LS.setItem(ieTickKey, ++ieTickValue + '');
-          _broadcast(type, msg);
+          // buffer message
+          ieNetworkBuffer.push(wrapStorageMessage(type, msg));
+          // prepare to send message if not already waiting
+          if (!ieMsgTimer) {
+            queueCall(ieSendNetworkBuffer);
+          }
         } :
-        _broadcast,
+        function (type, msg) {
+          sendStorageMessage(wrapStorageMessage(type, msg));
+        },
+
+      queueCall = isIE ?
+        // hold call to function until throttle triggers
+        function (fnc, args) {
+          ieCallQueue.push([fnc, args]);
+          ieRunQueue();
+        } :
+        // call function immediately and avoid queue
+        runCall,
 
       postMessageCommands = {
 
@@ -434,7 +464,7 @@ SubEtha Message Bus (se-msg)
               // unregister from network
               unregisterNetworkClient(client);
               // announce drop
-              fireDropEvent(client);
+              queueCall(fireDropEvent, [client]);
               // pass-thru when there are bridge clients in this channel
               if (bridgeChannelCnts[client.channel]) {
                 hostPayload.drops.push(clientData);
@@ -446,7 +476,7 @@ SubEtha Message Bus (se-msg)
 
           // pass event to host
           if (shareWithHost) {
-            msgHost('net', hostPayload);
+            queueCall(msgHost, ['net', hostPayload]);
           }
 
         },
@@ -466,7 +496,7 @@ SubEtha Message Bus (se-msg)
         */
         client: function (msg) {
           relayToHost(msg);
-          fireMessageEvent(msg);
+          queueCall(fireMessageEvent, [msg]);
         }
 
       },
@@ -505,13 +535,10 @@ SubEtha Message Bus (se-msg)
 
           // stop monitoring localStorage
           if (isIE910) {
-            // listen for name change
-            unbind(document, 'storage', ie910CheckForChange);
+            unbind(doc, 'storage', ieCheckManifest);
           } else if (isIE11) {
-            // watch local storage
-            clearInterval(ie11Timer);
+            clearInterval(ie11ManifestTimer);
           } else {
-            // stop listening for local storage commands
             unbind(scope, 'storage', localStorageRouter);
           }
 
@@ -528,6 +555,8 @@ SubEtha Message Bus (se-msg)
 
           // when no more clients exist
           if (!networkClientsCnt) {
+            // remove entire manifest
+            ieRemoveCookie();
             // delete localstorage msg key - security'ish?
             LS.removeItem(msgKey);
             LS.removeItem(netKey);
@@ -598,27 +627,87 @@ SubEtha Message Bus (se-msg)
           }
 
 
-          // randomly delay network bootstrap, to reduce startup lag
+          // randomly delay network bootstrap, to reduce startup lag/collision
           // thx https://github.com/mafintosh !
           setTimeout(function () {
-            var allClients;
+            var
+              allClients,
+              bmap,
+              bid;
 
             // exit if already destroyed
             if (destroyed) {
               return;
             }
 
-            // get network channels
-            allClients = LS.getItem(netKey);
-            // replace with client data with client instance
-            if (isFullString(allClients)) {
+            // retrieve existing clients
+            if (isIE) {
+              // via manifest
+
+              // get manifest for the first time
+              ieGetManifest();
+
+              // capture current bridge ticks
+              // the reference will be destroyed/cloned, when the manifest is retrieved again
+              ieBridgeTicks = ieManifest.m;
+
+              // prep to build clients JSON string
+              allClients = '';
+              // merge network maps from each bridge
+              for (bid in ieManifest.b) {
+                if (protoHas.call(ieManifest.b, bid)) {
+                  bmap = getStorage(bid + netKeySuffix);
+                  // if expected type and more than "[]"...
+                  if (isFullString(bmap) && bmap.length > 2) {
+                    // append array delimiter
+                    if (allClients.length) {
+                      allClients += ',';
+                    }
+                    // add stringified array, after removing array brackets
+                    allClients += bmap.slice(-1,-1);
+                  } /* else {
+                    // this map is invalid... do we remove this network map, etc?
+                  }*/
+                }
+              }
+              // wrap in expected array brackets
+              allClients = '[' + allClients + ']';
+
+              // add this bridge to the manifest
+              ieCookie.b[bridgeId] = 1;
+              // save manifest
+              ieSetManifest();
+
+            } else {
+              // via storage
+
+              // get network channels
+              allClients = getStorage(netKey);
+            }
+
+            // create client instances
+            if (isFullString(allClients) && allClients.length > 2) {
               try {
                 allClients = JSONparse(allClients);
               } catch (e) {
-                LS.removeItem(netKey);
-                // exit? fail? log?
+                if (isIE) {
+                  /*
+                    one of the storage keys was malformed.
+                    what do we do?
+
+                    1. do we kill the offending storage key - so no other bridge goes through this?
+                    2. message the bridge and tell them to update it themselves?
+                    3. tell other bridges to drop those clients?
+                    4. all of the above??
+                  */
+                } else {
+                  LS.removeItem(netKey);
+                  // exit? fail? log?
+                }
               }
-              if (Array.isArray(allClients)) {
+
+              // initilialize client instances
+              if (isArray(allClients)) {
                 ln = allClients.length;
                 while (ln--) {
                   registerNetworkClient(new NetworkClient(allClients[ln]));
@@ -631,13 +720,13 @@ SubEtha Message Bus (se-msg)
 
             // monitor localStorage
             if (isIE910) {
-              // listen for name change
-              bind(document, 'storage', ie910CheckForChange);
+              // check manifest when localstorage fires
+              bind(doc, 'storage', ieCheckManifest);
             } else if (isIE11) {
-              // watch local storage
-              ie11Timer = setInterval(ie11CheckForChange, 1);
+              // watch manifest
+              ie11ManifestTimer = setInterval(ieCheckManifest, ieMsgDelay + 10);
             } else {
-              // otherwise listen as normal and hope for the best
+              // otherwise listen as normal
               bind(scope, 'storage', localStorageRouter);
             }
 
@@ -740,6 +829,13 @@ SubEtha Message Bus (se-msg)
       }
     ;
 
+    // exit now if platform is unsupported
+    if (unsupported) {
+      // exiting before inheritance chains have been created
+      // this OK since the whole thing shouldn't be used and ups performance
+      return bridge;
+    }
+
     // UTILITY FUNCTIONS
 
     // shallow object merge
@@ -757,6 +853,11 @@ SubEtha Message Bus (se-msg)
         }
       }
       return base;
+    }
+
+    // return date timestamp
+    function now() {
+      return new Date();
     }
 
     // returns true when one of the keys is not in the given object
@@ -794,7 +895,7 @@ SubEtha Message Bus (se-msg)
     function guid_helper (c) {
       var
         r = mathRandom() * 16 | 0,
-        v = c === 'x' ? r : (r & 0x3 | 0x8);
+        v = c == 'x' ? r : (r & 0x3 | 0x8);
 
       return v.toString(16);
     }
@@ -818,34 +919,166 @@ SubEtha Message Bus (se-msg)
 
     // FUNCTIONS
 
-    // check if set has incremented
-    function ie910CheckForChange() {
-      var currentTickValue = LS.getItem(ieTickKey);
+    // scan manifest for message key updates
+    function ieCheckManifest() {
+      var
+        bid,
+        tick,
+        newTick,
+        bridgeTicks,
+        bValue
+      ;
 
-      // exit if no value
-      if (!currentTickValue) {
-        return;
+      // get latest manifest
+      ieGetManifest();
+
+      bridgeTicks = ieCookie.m;
+
+      for (bid in bridgeTicks) {
+        // if not inherited and already a known bridge
+        if (
+          // not inherited
+          protoHas.call(bridgeTicks, bid) &&
+          // known bridge
+          protoHas.call(ieBridgeTicks, bid) &&
+          // greater than current message
+          /*
+            We could check to ensure the tick has incremented once
+            If more than one, then we could kill the bridge, in order
+            to reset everything?
+          */
+          (newTick = +bridgeTicks[bid]) > ieBridgeTicks[bid]
+        ) {
+          // update tick
+          ieBridgeTicks[bid] = newTick;
+
+          // retrieve this bridge's message key
+          bValue = getStorage(bid + msgKeySuffix);
+
+          // skip if it doesn't look like an array
+          if (bValue.charAt(0) != '[' || bValue.charAt(bValue.length - 1) != ']') {
+            continue;
+          } /* else throw? */
+
+          // attempt to parse array
+          try {
+            bValue = JSONparse(bValue);
+          } catch (e) {
+            continue;
+          }
+
+          // process array of values
+          if (isArray(bValue)) {
+            j = bValue.length;
+            for (i = 0; i < j; i++) {
+              // pass to router for individual controller handling
+              localStorageRouter({
+                key: msgKey,
+                newValue: bValue
+              });
+            }
+          }
+        }
       }
-      // convert value to number
-      currentValue *= 1;
-      // if greater tick
-      if (currentTickValue != ieTickValue) {
-        // broadcast value msgKey as an event
-        localStorageRouter({
-          key: msgKey,
-          newValue: LS.getItem(msgKey)
-        });
-      }
-      ieTickValue = currentTickValue;
     }
 
-    function ie11CheckForChange() {
-      var currentValue = LS.getItem(msgKey);
-      if (currentValue != ie11LastVal) {
-        // broadcast value msgKey as an event
-        localStorageRouter({key:msgKey, newValue: currentValue});
-        ie11LastVal = currentValue;
+    // update ieCookie from document.cookie
+    function ieGetManifest() {
+      var
+        cookieStr = doc.cookie,
+        startPos = cookieStr.indexOf(ieCookieIndexSearchStr),
+        endPos,
+        parsed
+      ;
+      if (~startPos) {
+        endPos = cookie.indexOf(';', startPos);
+        cookieStr = cookieStr.substring(startPos, ~endPos ? endPos : undefined);
+        if (cookieStr) {
+          try {
+            ieManifest = JSON.parse(cookieStr);
+            parsed = 1;
+          } catch (e) {}
+        }
       }
+      if (!parsed) {
+        ieManifest = {
+          // bridge manifest
+          b: {},
+          // message manifest
+          m: {}
+        };
+      }
+    }
+
+    function ieSetManifest() {
+      // not escaping because the characters are safe
+      // and we want to minimize cookie size
+      doc.cookie = ieCookieSetStr + JSON.stringify(ieManifest);
+    }
+
+    function ieRemoveCookie() {
+      doc.cookie = ieCookieRemoveStr;
+    }
+
+    // send array-buffer of network messages
+    function ieSendNetworkBuffer() {
+      if (!ieNetworkBuffer.length) {
+        return;
+      }
+
+      // update msg tick for this bridge
+      ieGetManifest();
+      ieCookie.t[bridgeId] = ++ieTickValue;
+      ieSetManifest();
+
+      // update local storage
+      sendStorageMessage(ieNetworkBuffer);
+
+      // empty buffer
+      ieNetworkBuffer.length = 0;
+    }
+
+    function runCall(fnc, args) {
+      if (args) {
+        fnc.apply(0, args);
+      } else {
+        fnc();
+      }
+    }
+
+    /*
+    Executes queue of calls, long as:
+      1. the network buffer is empty, or
+      2. the netwrok buffer is not empty and the last message was sent more than 50ms ago
+    */
+    function ieRunQueue() {
+      var
+        runTime = now(),
+        timeRemaining = runTime - ieLastMsgTime,
+        i = 0,
+        j = ieCallQueue.length
+      ;
+
+      clearTimeout(ieMsgTimer);
+
+      // exit if last call was too recent
+      if (timeRemaining < ieMsgDelay) {
+        ieMsgTimer = setTimeout(ieRunQueue, timeRemaining + 3);
+        return;
+      }
+
+      // is this needed?
+      ieMsgTimer = 0;
+
+      // execute call queue
+      for (; i < ln; i++) {
+        runCall.apply(0, ieCallQueue[i]);
+      }
+
+      // clear call queue
+      ieCallQueue.length = 0;
+      // capture last send time
+      ieLastMsgTime = runTime;
     }
 
     function resolveNetworkChannel(channelName) {
@@ -864,13 +1097,25 @@ SubEtha Message Bus (se-msg)
       return bridgeChannels[channelName];
     }
 
-    // share message with network
-    function _broadcast(type, msg) {
-      LS.setItem(msgKey, storagePfx + lastStamp + JSONstringify({
+    function wrapStorageMessage(type, msg) {
+      return {
         type: type,
         bid: bridgeId,
         msg: msg
-      }));
+      };
+    }
+
+    // share message with network
+    function sendStorageMessage(payload) {
+      setStorage(msgKey, storagePfx + lastStamp + JSONstringify(payload));
+    }
+
+    function setStorage(key, val) {
+      LS.setItem(key, val);
+    }
+
+    function getStorage(key) {
+      return LS.getItem(key);
     }
 
     function relayToHost(msg, channelName) {
@@ -907,12 +1152,12 @@ SubEtha Message Bus (se-msg)
           hasBridgeClient(msg.to)
         )
       ) {
-        msgHost('client', msg);
+        queueCall(msgHost, ['client', msg]);
       }
     }
 
     // send message to host
-    function msgHost(type, msg, sent) {
+    function msgHost(type, msg) {
       postMessage(
         // protocol message
         [
@@ -928,7 +1173,7 @@ SubEtha Message Bus (se-msg)
             JSONstringify({
               mid: guid(),
               type: type,
-              sent: sent || new Date(),
+              sent: now(),
               msg: msg
             }) +
             // random tail padding
@@ -1067,8 +1312,9 @@ SubEtha Message Bus (se-msg)
         client,
         channelId,
         channel,
+        channels = isIE ? bridgeChannels : networkChannels,
         payload,
-        allClients;
+        clients;
 
       // clear timer
       clearTimeout(networkChangeTimer);
@@ -1094,28 +1340,28 @@ SubEtha Message Bus (se-msg)
       // only notify when there are joins or drops
       if (joins.length || drops.length) {
         // convert channels to arrays
-        allClients = [];
-        for (channelId in networkChannels) {
-          channel = networkChannels[channelId];
-          for (clientId in channel) {
-            allClients.push(channel[clientId]);
+        clients = [];
+        for (channelId in channels) {
+          if (protoHas.call(channels, channelId)) {
+            channel = channels[channelId];
+            for (clientId in channel) {
+              if (protoHas.call(channel, clientId)) {
+                clients.push(channel[clientId]);
+              }
+            }
           }
         }
-        if (isIE910) {
-          // clear tick key - so ie9 & 10 don't asses the change as a message to process
-          LS.setItem(ieTickKey, '');
-        }
-        // store network channels
-        LS.setItem(netKey, JSONstringify(allClients));
+        // store channels directly
+        setStorage(netKey, JSONstringify(clients));
 
         payload = {
           joins: joins,
           drops: drops
         };
 
-        broadcast('net', payload);
+        queueNetworkRelay('net', payload);
         if (!skipHost) {
-          msgHost('net', payload);
+          queueCall(msgHost, ['net', payload]);
         }
       }
     }
@@ -1234,7 +1480,7 @@ SubEtha Message Bus (se-msg)
         code = CLIENT_RSP_MISSING_COMMAND;
 
       // capture to cache-bust db changes
-      lastStamp = evt.timeStamp || new Date() * 1;
+      lastStamp = evt.timeStamp || now() * 1;
 
       // parser
       if (
@@ -1291,27 +1537,30 @@ SubEtha Message Bus (se-msg)
         key = evt.key,
         msg = evt.newValue;
 
-      // exit when...
-      if (
-        // not the right key
-        key != msgKey ||
-        // value is not a string
-        typeof msg != 'string' ||
-        // string is invalid
-        !r_validStorageEvent.test(msg)
-      ) {
+      // exit when not the right key
+      if (key != msgKey) {
         return;
       }
 
-      // extract "body" of message
-      msg = msg.substring(msg.indexOf('{'));
+      // process string
+      if (typeof msg == 'string') {
 
-      // exit on parse error
-      try {
-        msg = JSONparse(msg);
-      } catch (e) {
-        // log?
-        return;
+        if (!r_validStorageEvent.test(msg)) {
+          // string is invalid
+          return;
+        }
+
+        // extract "body" of message
+        msg = msg.substring(msg.indexOf('{'));
+
+        // exit on parse error
+        try {
+          msg = JSONparse(msg);
+        } catch (e) {
+          // log?
+          return;
+        }
+
       }
 
       // second security
@@ -1333,11 +1582,6 @@ SubEtha Message Bus (se-msg)
 
     function handleFirstPing(evt) {
       bridge.init(evt.data);
-    }
-
-    // exit now if platform is unsupported
-    if (unsupported) {
-      return bridge;
     }
 
     // manage request to authorize clients
@@ -1456,13 +1700,13 @@ SubEtha Message Bus (se-msg)
             )
           ) {
             // relay message to network
-            broadcast('client', msg);
+            queueNetworkRelay('client', msg);
             relayed = 1;
           }
 
           // if anything got relayed
           if (relayed) {
-            fireMessageEvent(msg);
+            queueCall(fireMessageEvent, [msg]);
           }
 
         }
@@ -1514,7 +1758,7 @@ SubEtha Message Bus (se-msg)
       var me = this;
 
       Client.call(me, clientData);
-      me.start = new Date();
+      me.start = now();
       me.bid = bridgeId;
     }
     BridgeClient.prototype = new Client();
@@ -1549,6 +1793,8 @@ SubEtha Message Bus (se-msg)
     if (isFullString(scope._subetha)) {
       // use namespaced token if present in global
       bridge.init(scope._subetha);
+      // attempt to remove token??
+      delete scope._subetha;
     } else {
       // await first ping
       bind(scope, 'message', handleFirstPing);
