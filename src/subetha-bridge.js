@@ -161,7 +161,7 @@ SubEtha Message Bus (se-msg)
       CLIENT_RSP_MISSING_COMMAND = 1,
 
       // post message utility flag
-      canPostObjects = !!function () {
+      canPostObjects = isIE ? 0 : !!function () {
         var yes = 1;
 
         // synchronous check for postMessage object support!
