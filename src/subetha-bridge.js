@@ -105,6 +105,8 @@ SubEtha Message Bus (se-msg)
       isIE11 = !isIE910 && /trident/i.test(navigator.userAgent),
       isIE = isIE910 || isIE11,
       ie11ManifestTimer,
+      ieNetworkBuffer = [],
+      ieCallQueue = [],
       ieManifest,
       ieCookieIndexSearchStr,
       ieCookieSetStr,
@@ -672,7 +674,7 @@ SubEtha Message Bus (se-msg)
               allClients = '[' + allClients + ']';
 
               // add this bridge to the manifest
-              ieCookie.b[bridgeId] = 1;
+              ieManifest.b[bridgeId] = 1;
               // save manifest
               ieSetManifest();
 
@@ -930,7 +932,7 @@ SubEtha Message Bus (se-msg)
       // get latest manifest
       ieGetManifest();
 
-      bridgeTicks = ieCookie.m;
+      bridgeTicks = ieManifest.m;
 
       for (bid in bridgeTicks) {
         // if not inherited and already a known bridge
@@ -980,7 +982,7 @@ SubEtha Message Bus (se-msg)
       }
     }
 
-    // update ieCookie from document.cookie
+    // update ieManifest from document.cookie
     function ieGetManifest() {
       var
         cookieStr = doc.cookie,
@@ -989,7 +991,7 @@ SubEtha Message Bus (se-msg)
         parsed
       ;
       if (~startPos) {
-        endPos = cookie.indexOf(';', startPos);
+        endPos = cookieStr.indexOf(';', startPos);
         cookieStr = cookieStr.substring(startPos, ~endPos ? endPos : undefined);
         if (cookieStr) {
           try {
@@ -1026,7 +1028,7 @@ SubEtha Message Bus (se-msg)
 
       // update msg tick for this bridge
       ieGetManifest();
-      ieCookie.t[bridgeId] = ++ieTickValue;
+      ieManifest.m[bridgeId] = ++ieTickValue;
       ieSetManifest();
 
       // update local storage
@@ -1069,7 +1071,7 @@ SubEtha Message Bus (se-msg)
       ieMsgTimer = 0;
 
       // execute call queue
-      for (; i < ln; i++) {
+      for (; i < j; i++) {
         runCall.apply(0, ieCallQueue[i]);
       }
 
@@ -1244,7 +1246,7 @@ SubEtha Message Bus (se-msg)
       // unlock queue
       relayQueueLocked = 0;
       // resume queue next
-      next(runRelayQueue());
+      next(runRelayQueue);
     }
 
     // process next client event
