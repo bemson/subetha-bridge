@@ -1057,7 +1057,9 @@ SubEtha Message Bus (se-msg)
         bids,
         msgs,
         hasExpiredBridge,
-        bid
+        bid,
+        clientId,
+        client
       ;
       console.log('cookie check!' + cookieStr);
       if (~startPos) {
@@ -1079,6 +1081,15 @@ SubEtha Message Bus (se-msg)
           if (protoHas.call(msgs, bid) && !protoHas.call(bids, bid)) {
             console.log('removed expired bridge ' + bid);
             hasExpiredBridge = 1;
+            // discard clients from the ghost bridge
+            for (clientId in networkClients) {
+              if (
+                protoHas.call(networkClients, clientId) &&
+                (client = networkClients[clientId]).bid == bid
+              ) {
+                queueNetworkChange(client, dropQueue);
+              }
+            }
             delete msgs[bid];
             removeStorage(bid + netKeySuffix);
             removeStorage(bid + msgKeySuffix);
