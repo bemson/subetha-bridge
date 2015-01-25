@@ -108,14 +108,20 @@ SubEtha Message Bus (se-msg)
       ieNetworkBuffer = [],
       ieCallQueue = [],
       ieManifest,
-      ieCookieIndexSearchStr,
-      ieCookieSetStr,
-      ieCookieRemoveStr,
+      ieCookieNameStr = protocolVersion + '=',
+      ieCookieNameStrLength = ieCookieNameStr.length,
+      ieCookiePathStr = ';path=/',
+      ieCookieRemoveStr = ieCookieNameStr + ';expires=0' + ieCookiePathStr,
       ieTickValue = 0,
       ieBridgeTicks,
       ieMsgTimer,
       ieLastMsgTime = 0,
       ieMsgDelay = 30,
+      ie_r_validInitialStorageEvent = new RegExp(
+        protocolVersion + backtick +
+        '[0-9a-f-]{36}' + backtick +
+        '\\d+' + '\\[.+\\]$'
+      ),
 
       // localstorage keys
       netKeySuffix = '-net',
@@ -235,6 +241,7 @@ SubEtha Message Bus (se-msg)
         // hold call to function until throttle triggers
         function (fnc, args) {
           ieCallQueue.push([fnc, args]);
+          console.log('queued call ' + ieCallQueue.length + ' for invocation');
           ieRunQueue();
         } :
         // call function immediately and avoid queue
@@ -314,6 +321,8 @@ SubEtha Message Bus (se-msg)
             clientId = clientData.id,
             creds = clientData.creds,
             request;
+
+          console.log('handling auth request!');
 
           // exit/ignore when already joined or authing
           if (
@@ -593,8 +602,9 @@ SubEtha Message Bus (se-msg)
           speakerKey = token.substring(pos, token.indexOf(backtick, pos));
           pos += speakerKey.length + 1;
 
-          // exit if no key
+          // using custom check because IE is unicorns
           if (isNaN(speakerKey)) {
+          // if (typeof isNaN == 'undefined' ? !/^[0-9\.]+$/.test(speakerKey) : isNaN(speakerKey)) {
             return;
           }
 
@@ -664,7 +674,7 @@ SubEtha Message Bus (se-msg)
                       allClients += ',';
                     }
                     // add stringified array, after removing array brackets
-                    allClients += bmap.slice(-1,-1);
+                    allClients += bmap.slice(1,-1);
                   } /* else {
                     // this map is invalid... do we remove this network map, etc?
                   }*/
@@ -700,6 +710,7 @@ SubEtha Message Bus (se-msg)
                     3. tell other bridges to drop those clients?
                     4. all of the above??
                   */
+                  console.log('init: could not parse clients list from cookie');
                 } else {
                   LS.removeItem(netKey);
                   // exit? fail? log?
@@ -710,6 +721,7 @@ SubEtha Message Bus (se-msg)
               if (isArray(allClients)) {
                 ln = allClients.length;
                 while (ln--) {
+                  console.log('INIT: registering existing network client: ' + allClients[ln].id);
                   registerNetworkClient(new NetworkClient(allClients[ln]));
                 }
               }
@@ -733,12 +745,19 @@ SubEtha Message Bus (se-msg)
             // note that we're initialized
             bridge.fire(INITIALIZE_EVENT);
 
-            if (!destroyed) {
-              // listen for when the page closes
-              bind(scope, 'unload', bridge.destroy);
-              // tell host we're ready
-              msgHost('ready', origin);
+            if (destroyed) {
+              return;
             }
+
+            // listen for when the page closes
+            bind(scope, 'unload', bridge.destroy);
+            console.log('INIT: told host we\'re ready to talk!');
+            // tell host we're ready
+            msgHost('ready', origin);
+
+            // setInterval(function () {
+            //   console.log('cookie beep: ' + document.cookie);
+            // }, 30000);
           }, Math.round(mathRandom() * 75));
         },
         on: function (evt, callback) {
@@ -923,31 +942,39 @@ SubEtha Message Bus (se-msg)
     function ieCheckManifest() {
       var
         bid,
-        tick,
         newTick,
         bridgeTicks,
         bValue
       ;
+
+      if (arguments.length && arguments[0].type == 'storage') {
+        console.log('checking manifest due to storage event');
+      }
 
       // get latest manifest
       ieGetManifest();
 
       bridgeTicks = ieManifest.m;
 
+      console.log('Inspecting ' + Object.keys(bridgeTicks).length + ' bridge ticks');
+      // remove this bridge as a messenger
+      delete bridgeTicks[bridgeId];
+
       for (bid in bridgeTicks) {
-        // if not inherited and already a known bridge
+        console.log('comparing ' + bridgeTicks[bid] + ' in manifest with ' + ieBridgeTicks[bid] + ' in memory.');
         if (
-          // not inherited
-          protoHas.call(bridgeTicks, bid) &&
-          // known bridge
-          protoHas.call(ieBridgeTicks, bid) &&
-          // greater than current message
-          /*
-            We could check to ensure the tick has incremented once
-            If more than one, then we could kill the bridge, in order
-            to reset everything?
-          */
-          (newTick = +bridgeTicks[bid]) > ieBridgeTicks[bid]
+          // not inherited prop of manifest
+          protoHas.call(bridgeTicks, bid) && (
+            // unknown bridge, or
+            !protoHas.call(ieBridgeTicks, bid) ||
+            // greater than last known message for this bridge
+            /*
+              We could check to ensure the tick has incremented one "unit"
+              If more than one, then we could kill the bridge, in order
+              to reset everything?
+            */
+            (newTick = +bridgeTicks[bid]) > ieBridgeTicks[bid]
+          )
         ) {
           // update tick
           ieBridgeTicks[bid] = newTick;
@@ -955,29 +982,42 @@ SubEtha Message Bus (se-msg)
           // retrieve this bridge's message key
           bValue = getStorage(bid + msgKeySuffix);
 
-          // skip if it doesn't look like an array
-          if (bValue.charAt(0) != '[' || bValue.charAt(bValue.length - 1) != ']') {
+          console.log('bridge ' + bid.substring(0,4) + ' has a message!');
+
+          // skip if it isn't an prefixed array
+          if (!ie_r_validInitialStorageEvent.test(bValue)) {
+            console.log('uh oh! message does not look like an valid grouped storage message -> ' + bValue);
             continue;
           } /* else throw? */
+
+          // extract array
+          bValue = bValue.substr(bValue.indexOf('['));
 
           // attempt to parse array
           try {
             bValue = JSONparse(bValue);
           } catch (e) {
+            console.log('message could not be parsed!');
             continue;
           }
 
           // process array of values
           if (isArray(bValue)) {
             j = bValue.length;
+            console.log('handling ' + j + ' messages');
             for (i = 0; i < j; i++) {
+              console.log('routing message ' + (i + 1) + ': ' + JSONstringify(bValue[i]));
               // pass to router for individual controller handling
               localStorageRouter({
                 key: msgKey,
-                newValue: bValue
+                newValue: bValue[i]
               });
             }
+          } else {
+            console.log('message was skipped since it is not an array');
           }
+        } else {
+          console.log('no change to bridge ' + bid.substr(0,4));
         }
       }
     }
@@ -986,13 +1026,14 @@ SubEtha Message Bus (se-msg)
     function ieGetManifest() {
       var
         cookieStr = doc.cookie,
-        startPos = cookieStr.indexOf(ieCookieIndexSearchStr),
+        startPos = cookieStr.indexOf(ieCookieNameStr),
         endPos,
         parsed
       ;
+      console.log('cookie check!' + cookieStr);
       if (~startPos) {
         endPos = cookieStr.indexOf(';', startPos);
-        cookieStr = cookieStr.substring(startPos, ~endPos ? endPos : undefined);
+        cookieStr = cookieStr.substring(startPos + ieCookieNameStrLength, ~endPos ? endPos : undefined);
         if (cookieStr) {
           try {
             ieManifest = JSON.parse(cookieStr);
@@ -1013,7 +1054,7 @@ SubEtha Message Bus (se-msg)
     function ieSetManifest() {
       // not escaping because the characters are safe
       // and we want to minimize cookie size
-      doc.cookie = ieCookieSetStr + JSON.stringify(ieManifest);
+      doc.cookie = ieCookieNameStr + JSON.stringify(ieManifest) + ieCookiePathStr;
     }
 
     function ieRemoveCookie() {
@@ -1063,12 +1104,15 @@ SubEtha Message Bus (se-msg)
 
       // exit if last call was too recent
       if (timeRemaining < ieMsgDelay) {
+        console.log('not calling queue because not enough time has passed (' + timeRemaining + ' < ' + ieMsgDelay + ') last time was ' + ieLastMsgTime);
         ieMsgTimer = setTimeout(ieRunQueue, timeRemaining + 3);
         return;
       }
 
       // is this needed?
       ieMsgTimer = 0;
+
+      console.log('executing queue of ' + ieCallQueue.length + ' calls');
 
       // execute call queue
       for (; i < j; i++) {
@@ -1294,6 +1338,7 @@ SubEtha Message Bus (se-msg)
 
     // add client to given (drop/join) queue and run queue later
     function queueNetworkChange(client, queue) {
+      console.log('change queued for client ' + client.id.substr(0,4));
       queue[client.id] = client;
       clearTimeout(networkChangeTimer);
       // allow 5ms of additional client activity
@@ -1351,6 +1396,7 @@ SubEtha Message Bus (se-msg)
             }
           }
         }
+        console.log('updating "net" key map');
         // store channels directly
         setStorage(netKey, JSONstringify(clients));
 
@@ -1363,6 +1409,8 @@ SubEtha Message Bus (se-msg)
         if (!skipHost) {
           queueCall(msgHost, ['net', payload]);
         }
+      } else {
+        console.log('no client changes to share');
       }
     }
 
