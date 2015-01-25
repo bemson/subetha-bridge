@@ -528,7 +528,10 @@ SubEtha Message Bus (se-msg)
         destroy: function () {
           var clientId;
 
+          console.log('destroying bridge ' + bridgeId);
+
           if (!initialized || destroyed) {
+            console.log('already destroyed');
             return;
           }
 
@@ -536,6 +539,7 @@ SubEtha Message Bus (se-msg)
 
           // disconnect remaining clients
           for (clientId in bridgeClients) {
+            console.log('telling parent to drop client ' + clientId);
             bridgeClients[clientId].drop();
           }
 
@@ -557,19 +561,34 @@ SubEtha Message Bus (se-msg)
           // detach all events
           bridge.off();
 
-          // broadcast changes immediately - skip host since we're exiting
-          broadcastNetworkChanges(1);
-          // inform host we're gone
-          msgHost('die', 123);
-
-          // when no more clients exist
-          if (!networkClientsCnt) {
+          if (networkClientsCnt) {
+            console.log('tell other bridges we have left');
+            // broadcast changes immediately - skip host since we're exiting
+            broadcastNetworkChanges(1);
+          } else if (isIE) {
+            console.log('discard manifest since no one else is around');
             // remove entire manifest
             ieRemoveCookie();
-            // delete localstorage msg key - security'ish?
-            LS.removeItem(msgKey);
-            LS.removeItem(netKey);
           }
+
+          // discard storage keys if not needed by other bridges - or for this bridge, in IE
+          if (
+            !networkClientsCnt ||
+            (
+              isIE &&
+              !bridgeClientsCnt
+            )
+          ) {
+            console.log('removed storage keys');
+            // delete localstorage keys - security'ish?
+            removeStorage(msgKey);
+            removeStorage(netKey);
+          } else {
+            console.log('did not remove storage keys');
+          }
+
+          // inform host we're gone - send some kind of code
+          msgHost('die', 123);
         },
         // parse token
         init: function (token) {
@@ -943,7 +962,7 @@ SubEtha Message Bus (se-msg)
       var
         bid,
         newTick,
-        bridgeTicks,
+        manifestTicks,
         bValue
       ;
 
@@ -954,29 +973,35 @@ SubEtha Message Bus (se-msg)
       // get latest manifest
       ieGetManifest();
 
-      bridgeTicks = ieManifest.m;
+      manifestTicks = ieManifest.m;
 
-      console.log('Inspecting ' + Object.keys(bridgeTicks).length + ' bridge ticks');
+      console.log('Inspecting ' + Object.keys(manifestTicks).length + ' bridge ticks');
       // remove this bridge as a messenger
-      delete bridgeTicks[bridgeId];
+      delete manifestTicks[bridgeId];
 
-      for (bid in bridgeTicks) {
-        console.log('comparing ' + bridgeTicks[bid] + ' in manifest with ' + ieBridgeTicks[bid] + ' in memory.');
+      for (bid in manifestTicks) {
+        console.log('comparing ' + manifestTicks[bid] + ' in manifest with ' + ieBridgeTicks[bid] + ' in memory for ' + bid.substr(0,4));
+
+        // skip inherited props
+        if (!protoHas.call(manifestTicks, bid)) {
+          continue;
+        }
+
+        // coerce manifest tick now
+        newTick =  +manifestTicks[bid];
+
         if (
-          // not inherited prop of manifest
-          protoHas.call(bridgeTicks, bid) && (
-            // unknown bridge, or
-            !protoHas.call(ieBridgeTicks, bid) ||
-            // greater than last known message for this bridge
-            /*
-              We could check to ensure the tick has incremented one "unit"
-              If more than one, then we could kill the bridge, in order
-              to reset everything?
-            */
-            (newTick = +bridgeTicks[bid]) > ieBridgeTicks[bid]
-          )
+          // unknown bridge, or
+          !protoHas.call(ieBridgeTicks, bid) ||
+          // greater than last known message for this bridge
+          /*
+            We could check to ensure the tick has incremented one "unit"
+            If more than one, then we could kill the bridge, in order
+            to reset everything?
+          */
+          newTick > ieBridgeTicks[bid]
         ) {
-          // update tick
+          // update/capture tick
           ieBridgeTicks[bid] = newTick;
 
           // retrieve this bridge's message key
@@ -1028,7 +1053,11 @@ SubEtha Message Bus (se-msg)
         cookieStr = doc.cookie,
         startPos = cookieStr.indexOf(ieCookieNameStr),
         endPos,
-        parsed
+        parsed,
+        bids,
+        msgs,
+        hasExpiredBridge,
+        bid
       ;
       console.log('cookie check!' + cookieStr);
       if (~startPos) {
@@ -1041,7 +1070,25 @@ SubEtha Message Bus (se-msg)
           } catch (e) {}
         }
       }
-      if (!parsed) {
+      if (parsed) {
+        bids = ieManifest.b;
+        msgs = ieManifest.m;
+        // remove dead bridges from messages
+        for (bid in msgs) {
+          // discard message ticker when bid is not sanctioned
+          if (protoHas.call(msgs, bid) && !protoHas.call(bids, bid)) {
+            console.log('removed expired bridge ' + bid);
+            hasExpiredBridge = 1;
+            delete msgs[bid];
+            removeStorage(bid + netKeySuffix);
+            removeStorage(bid + msgKeySuffix);
+          }
+        }
+        // save clean up changes now
+        if (hasExpiredBridge) {
+          ieSetManifest();
+        }
+      } else {
         ieManifest = {
           // bridge manifest
           b: {},
@@ -1160,6 +1207,10 @@ SubEtha Message Bus (se-msg)
 
     function getStorage(key) {
       return LS.getItem(key);
+    }
+
+    function removeStorage(key) {
+      LS.removeItem(key);
     }
 
     function relayToHost(msg, channelName) {
