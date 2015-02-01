@@ -1130,7 +1130,7 @@ SubEtha Message Bus (se-msg)
     }
 
     function log(v) {
-      console.log(v);
+      // console.log(v);
     }
 
     function ieSetManifest() {
