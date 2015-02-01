@@ -75,6 +75,7 @@ SubEtha Message Bus (se-msg)
       // initialization
       initialized = 0,
       destroyed = 0,
+      initedPeers = 0,
 
 
       // security
@@ -113,10 +114,11 @@ SubEtha Message Bus (se-msg)
       ieCookiePathStr = ';path=/',
       ieCookieRemoveStr = ieCookieNameStr + ';expires=0' + ieCookiePathStr,
       ieTickValue = 0,
+      ieBridgeIds = {},
       ieBridgeTicks,
       ieMsgTimer,
       ieLastMsgTime = 0,
-      ieMsgDelay = 30,
+      ieMsgDelay = 100,
       ie_r_validInitialStorageEvent = new RegExp(
         protocolVersion + backtick +
         '[0-9a-f-]{36}' + backtick +
@@ -241,7 +243,7 @@ SubEtha Message Bus (se-msg)
         // hold call to function until throttle triggers
         function (fnc, args) {
           ieCallQueue.push([fnc, args]);
-          console.log('queued call ' + ieCallQueue.length + ' for invocation');
+          // log('queued call ' + ieCallQueue.length + ' for invocation');
           ieRunQueue();
         } :
         // call function immediately and avoid queue
@@ -322,7 +324,7 @@ SubEtha Message Bus (se-msg)
             creds = clientData.creds,
             request;
 
-          console.log('handling auth request!');
+          log('handling auth request!');
 
           // exit/ignore when already joined or authing
           if (
@@ -389,12 +391,8 @@ SubEtha Message Bus (se-msg)
             // immediately remove client from bridge and network
             unregisterBridgeClient(client);
             unregisterNetworkClient(client);
-            // if client was never announced
-            if (protoHas.call(joinQueue, clientId)) {
-              // simply remove from join queue
-              delete joinQueue[clientId];
-            } else {
-              // (otherwise) prepare broadcast network change
+            // if client was never announced, prepare to broadcast network change
+            if (!protoHas.call(joinQueue, clientId)) {
               queueNetworkChange(client, dropQueue);
             }
           } else if (protoHas.call(pendingAuthReqs, clientId)) {
@@ -528,10 +526,10 @@ SubEtha Message Bus (se-msg)
         destroy: function () {
           var clientId;
 
-          console.log('destroying bridge ' + bridgeId);
+          log('destroying bridge ' + bridgeId);
 
           if (!initialized || destroyed) {
-            console.log('already destroyed');
+            log('bridge already destroyed');
             return;
           }
 
@@ -539,7 +537,7 @@ SubEtha Message Bus (se-msg)
 
           // disconnect remaining clients
           for (clientId in bridgeClients) {
-            console.log('telling parent to drop client ' + clientId);
+            log('telling parent to drop client ' + clientId);
             bridgeClients[clientId].drop();
           }
 
@@ -561,40 +559,41 @@ SubEtha Message Bus (se-msg)
           // detach all events
           bridge.off();
 
-          if (networkClientsCnt) {
-            console.log('tell other bridges we have left');
-            // broadcast changes immediately - skip host since we're exiting
-            broadcastNetworkChanges(1);
-          } else if (isIE) {
-            console.log('discard manifest since no one else is around');
-            // remove entire manifest
-            ieRemoveCookie();
+          log('tell other bridges who has left');
+
+          // broadcast changes immediately - skip host since we're exiting
+          broadcastNetworkChanges(1);
+
+          if (isIE) {
+            if (networkClientsCnt) {
+              log('removing bridge from manifest');
+              delete ieManifest.b[bridgeId];
+              ieSetManifest();
+            } else {
+              log('discarding manifest since no one else is around');
+              // remove entire manifest
+              ieRemoveCookie();
+            }
           }
 
           // discard storage keys if not needed by other bridges - or for this bridge, in IE
-          if (
-            !networkClientsCnt ||
-            (
-              isIE &&
-              !bridgeClientsCnt
-            )
-          ) {
-            console.log('removed storage keys');
+          if (isIE || !networkClientsCnt) {
+            log('removed storage keys');
             // delete localstorage keys - security'ish?
             removeStorage(msgKey);
             removeStorage(netKey);
           } else {
-            console.log('did not remove storage keys');
+            log('did not remove storage keys');
           }
 
           // inform host we're gone - send some kind of code
           msgHost('die', 123);
+          log('exit: coookie = "' + document.cookie + '"');
+          log('exit: storage length ' + localStorage.length);
         },
         // parse token
         init: function (token) {
-          var
-            pos = protocolVersion.length,
-            ln;
+          var pos = protocolVersion.length;
 
           // exit now if already initialized on unsupported platform
           if (initialized || destroyed || unsupported) {
@@ -659,91 +658,9 @@ SubEtha Message Bus (se-msg)
           // randomly delay network bootstrap, to reduce startup lag/collision
           // thx https://github.com/mafintosh !
           setTimeout(function () {
-            var
-              allClients,
-              bmap,
-              bid;
-
             // exit if already destroyed
             if (destroyed) {
               return;
-            }
-
-            // retrieve existing clients
-            if (isIE) {
-              // via manifest
-
-              // get manifest for the first time
-              ieGetManifest();
-
-              // capture current bridge ticks
-              // the reference will be destroyed/cloned, when the manifest is retrieved again
-              ieBridgeTicks = ieManifest.m;
-
-              // prep to build clients JSON string
-              allClients = '';
-              // merge network maps from each bridge
-              for (bid in ieManifest.b) {
-                if (protoHas.call(ieManifest.b, bid)) {
-                  bmap = getStorage(bid + netKeySuffix);
-                  // if expected type and more than "[]"...
-                  if (isFullString(bmap) && bmap.length > 2) {
-                    // append array delimiter
-                    if (allClients.length) {
-                      allClients += ',';
-                    }
-                    // add stringified array, after removing array brackets
-                    allClients += bmap.slice(1,-1);
-                  } /* else {
-                    // this map is invalid... do we remove this network map, etc?
-                  }*/
-                }
-              }
-              // wrap in expected array brackets
-              allClients = '[' + allClients + ']';
-
-              // add this bridge to the manifest
-              ieManifest.b[bridgeId] = 1;
-              // save manifest
-              ieSetManifest();
-
-            } else {
-              // via storage
-
-              // get network channels
-              allClients = getStorage(netKey);
-            }
-
-            // create client instances
-            if (isFullString(allClients) && allClients.length > 2) {
-              try {
-                allClients = JSONparse(allClients);
-              } catch (e) {
-                if (isIE) {
-                  /*
-                    one of the storage keys was malformed.
-                    what do we do?
-
-                    1. do we kill the offending storage key - so no other bridge goes through this?
-                    2. message the bridge and tell them to update it themselves?
-                    3. tell other bridges to drop those clients?
-                    4. all of the above??
-                  */
-                  console.log('init: could not parse clients list from cookie');
-                } else {
-                  LS.removeItem(netKey);
-                  // exit? fail? log?
-                }
-              }
-
-              // initilialize client instances
-              if (isArray(allClients)) {
-                ln = allClients.length;
-                while (ln--) {
-                  console.log('INIT: registering existing network client: ' + allClients[ln].id);
-                  registerNetworkClient(new NetworkClient(allClients[ln]));
-                }
-              }
             }
 
             // listen for client commands
@@ -770,14 +687,10 @@ SubEtha Message Bus (se-msg)
 
             // listen for when the page closes
             bind(scope, 'unload', bridge.destroy);
-            console.log('INIT: told host we\'re ready to talk!');
+            log('INIT: told host we\'re ready to talk!');
             // tell host we're ready
             msgHost('ready', origin);
-
-            // setInterval(function () {
-            //   console.log('cookie beep: ' + document.cookie);
-            // }, 30000);
-          }, Math.round(mathRandom() * 75));
+          }, (isIE ? 30 : 0) + Math.round(mathRandom() * 75));
         },
         on: function (evt, callback) {
           var me = this;
@@ -962,25 +875,34 @@ SubEtha Message Bus (se-msg)
       var
         bid,
         newTick,
+        newBridge,
         manifestTicks,
-        bValue
+        bValue,
+        routedMsg,
+        updateManifest,
+        i,
+        j
       ;
 
       if (arguments.length && arguments[0].type == 'storage') {
-        console.log('checking manifest due to storage event');
+        log('checking manifest due to storage event');
+      } else {
+        log('periodic cookie check');
       }
 
       // get latest manifest
       ieGetManifest();
 
+      // alias manifest message tick tracker
       manifestTicks = ieManifest.m;
 
-      console.log('Inspecting ' + Object.keys(manifestTicks).length + ' bridge ticks');
-      // remove this bridge as a messenger
+      // remove this bridge as a tracker
       delete manifestTicks[bridgeId];
 
+      log('Inspecting ' + Object.keys(manifestTicks).length + ' bridge ticks');
+
       for (bid in manifestTicks) {
-        console.log('comparing ' + manifestTicks[bid] + ' in manifest with ' + ieBridgeTicks[bid] + ' in memory for ' + bid.substr(0,4));
+        log('comparing ' + manifestTicks[bid] + ' in manifest with ' + ieBridgeTicks[bid] + ' in memory for ' + bid.substr(0,4));
 
         // skip inherited props
         if (!protoHas.call(manifestTicks, bid)) {
@@ -991,8 +913,8 @@ SubEtha Message Bus (se-msg)
         newTick =  +manifestTicks[bid];
 
         if (
-          // unknown bridge, or
-          !protoHas.call(ieBridgeTicks, bid) ||
+          // unknown bridge or bridge with no peers,
+          (newBridge = !protoHas.call(ieBridgeTicks, bid) || !protoHas.call(ieBridgeIds, bid) || !ieBridgeIds[bid]) ||
           // greater than last known message for this bridge
           /*
             We could check to ensure the tick has incremented one "unit"
@@ -1001,17 +923,53 @@ SubEtha Message Bus (se-msg)
           */
           newTick > ieBridgeTicks[bid]
         ) {
+          // if new bridge or no known peers...
+          if (newBridge) {
+            // // if bridge is not in bridges...
+            // if (!protoHas.call(ieManifest.b, bid)) {
+            //   log('removing bridge since its not in register' + bid.substr(0,4));
+            //   // remove from manifest
+            //   delete ieManifest.m[bid];
+            //   // flag to update manifest
+            //   updateManifest = 1;
+            //   // skip this bridge ticker
+            //   continue;
+            // }
+
+            log('mapping new bridge! '  + bid.substr(0,4));
+            // get client map for bridge
+            newBridge = ieGetBridgeClientMapAsString(bid);
+            if (newBridge) {
+              try {
+                // parse map into json objects
+                newBridge = JSONparse(newBridge);
+              } catch(e) {
+                newBridge = 0;
+              }
+              // add network clients
+              if (newBridge) {
+                log('network peers found via bridge ' + bid.substr(0,4));
+                // tally number of peers from bridge
+                ieBridgeIds[bid] = 0;
+                addNewNetworkClients(newBridge);
+              }
+            }
+          } else {
+            log('existing bridge has ' + ieBridgeIds[bid] + ' peers');
+          }
+
           // update/capture tick
           ieBridgeTicks[bid] = newTick;
 
           // retrieve this bridge's message key
           bValue = getStorage(bid + msgKeySuffix);
 
-          console.log('bridge ' + bid.substring(0,4) + ' has a message!');
+          log('bridge ' + bid.substring(0,4) + ' has a message!');
 
           // skip if it isn't an prefixed array
           if (!ie_r_validInitialStorageEvent.test(bValue)) {
-            console.log('uh oh! message does not look like an valid grouped storage message -> ' + bValue);
+            log('uh oh! message does not look like an valid grouped storage message -> "' + bValue + '"');
+            // if new bridge check again in 5 ms?
             continue;
           } /* else throw? */
 
@@ -1022,16 +980,21 @@ SubEtha Message Bus (se-msg)
           try {
             bValue = JSONparse(bValue);
           } catch (e) {
-            console.log('message could not be parsed!');
+            log('message could not be parsed!');
             continue;
           }
 
           // process array of values
           if (isArray(bValue)) {
             j = bValue.length;
-            console.log('handling ' + j + ' messages');
+            // log('handling ' + j + ' messages');
+            // update throttle marker, so we don't respond too quickly
+            if (!routedMsg) {
+              routedMsg = 1;
+              ieLastMsgTime = now();
+            }
             for (i = 0; i < j; i++) {
-              console.log('routing message ' + (i + 1) + ': ' + JSONstringify(bValue[i]));
+              log('routing message ' + (i + 1) + ': ' + JSONstringify(bValue[i]));
               // pass to router for individual controller handling
               localStorageRouter({
                 key: msgKey,
@@ -1039,12 +1002,27 @@ SubEtha Message Bus (se-msg)
               });
             }
           } else {
-            console.log('message was skipped since it is not an array');
+            log('message was skipped since it is not an array');
           }
         } else {
-          console.log('no change to bridge ' + bid.substr(0,4));
+          log('no change to bridge ' + bid.substr(0,4) + ' with ' + ieBridgeIds[bid] + ' peers');
+        }
+        if (updateManifest) {
+          ieSetManifest();
         }
       }
+    }
+
+    function ieGetBridgeClientMapAsString(bid) {
+      var clientMap = getStorage(bid + netKeySuffix);
+      // if expected type and more than "[]"...
+      if (isFullString(clientMap) && clientMap.length > 2) {
+        // return stringified array
+        return clientMap;
+      } /* else {
+        // this map is invalid... do we remove this network map, etc?
+      }*/
+      return '';
     }
 
     // update ieManifest from document.cookie
@@ -1056,12 +1034,14 @@ SubEtha Message Bus (se-msg)
         parsed,
         bids,
         msgs,
-        hasExpiredBridge,
+        hasDeadBridge,
+        deadBridges = {},
         bid,
         clientId,
-        client
+        client,
+        droppedNetworkClients
       ;
-      console.log('cookie check!' + cookieStr);
+      log('cookie check!' + cookieStr);
       if (~startPos) {
         endPos = cookieStr.indexOf(';', startPos);
         cookieStr = cookieStr.substring(startPos + ieCookieNameStrLength, ~endPos ? endPos : undefined);
@@ -1075,29 +1055,69 @@ SubEtha Message Bus (se-msg)
       if (parsed) {
         bids = ieManifest.b;
         msgs = ieManifest.m;
+
         // remove dead bridges from messages
         for (bid in msgs) {
           // discard message ticker when bid is not sanctioned
-          if (protoHas.call(msgs, bid) && !protoHas.call(bids, bid)) {
-            console.log('removed expired bridge ' + bid);
-            hasExpiredBridge = 1;
-            // discard clients from the ghost bridge
-            for (clientId in networkClients) {
-              if (
-                protoHas.call(networkClients, clientId) &&
-                (client = networkClients[clientId]).bid == bid
-              ) {
-                queueNetworkChange(client, dropQueue);
-              }
-            }
-            delete msgs[bid];
-            removeStorage(bid + netKeySuffix);
-            removeStorage(bid + msgKeySuffix);
+          if (!protoHas.call(bids, bid) && protoHas.call(msgs, bid)) {
+            log('removing expired bridge ' + bid);
+            hasDeadBridge = 1;
+            // capture dead bridge id
+            deadBridges[bid] = 1;
+          }
+        }
+        // remove orphaned bridges
+        for (bid in ieBridgeIds) {
+          // if bridge is no longer in the manifest
+          if (!protoHas.call(bids, bid) && protoHas.call(ieBridgeIds, bid)) {
+            log('removing orphaned bridge ' + bid);
+            hasDeadBridge = 1;
+            // capture dead bridge id
+            deadBridges[bid] = 1;
           }
         }
         // save clean up changes now
-        if (hasExpiredBridge) {
+        if (hasDeadBridge) {
+
+          // init payload to share with host
+          droppedNetworkClients = [];
+
+          for (bid in deadBridges) {
+            if (protoHas.call(deadBridges, bid)) {
+              // remove from ieBridgeIds
+              delete ieBridgeIds[bid];
+              // remove from manifest messages
+              delete msgs[bid];
+              // discard clients from this bridge
+              for (clientId in networkClients) {
+                if (
+                  protoHas.call(networkClients, clientId) &&
+                  (client = networkClients[clientId]).bid == bid
+                ) {
+
+                  // should be easy as client.unregister()
+
+                  unregisterNetworkClient(client);
+
+                  // capture client when there are bridge clients in this channel
+                  if (bridgeChannelCnts[client.channel]) {
+                    droppedNetworkClients.push(client);
+                  }
+
+                }
+              }
+              // remove storage keys - just in case
+              removeStorage(bid + netKeySuffix);
+              removeStorage(bid + msgKeySuffix);
+            }
+          }
+          // save manifest changes
           ieSetManifest();
+
+          if (droppedNetworkClients.length) {
+            log('informing host of clients that left' + JSONstringify(droppedNetworkClients));
+            queueCall(msgHost, ['net', {drops:droppedNetworkClients, joins:[]}]);
+          }
         }
       } else {
         ieManifest = {
@@ -1109,10 +1129,16 @@ SubEtha Message Bus (se-msg)
       }
     }
 
+    function log(v) {
+      console.log(v);
+    }
+
     function ieSetManifest() {
       // not escaping because the characters are safe
       // and we want to minimize cookie size
       doc.cookie = ieCookieNameStr + JSON.stringify(ieManifest) + ieCookiePathStr;
+      // update last set time
+      ieLastMsgTime = now();
     }
 
     function ieRemoveCookie() {
@@ -1127,6 +1153,7 @@ SubEtha Message Bus (se-msg)
 
       // update msg tick for this bridge
       ieGetManifest();
+      ieManifest.b[bridgeId] = 1;
       ieManifest.m[bridgeId] = ++ieTickValue;
       ieSetManifest();
 
@@ -1160,17 +1187,17 @@ SubEtha Message Bus (se-msg)
 
       clearTimeout(ieMsgTimer);
 
-      // exit if last call was too recent
-      if (timeRemaining < ieMsgDelay) {
-        console.log('not calling queue because not enough time has passed (' + timeRemaining + ' < ' + ieMsgDelay + ') last time was ' + ieLastMsgTime);
-        ieMsgTimer = setTimeout(ieRunQueue, timeRemaining + 3);
+      // exit if last call was too recent- unless we're destroyed
+      if (!destroyed && timeRemaining < ieMsgDelay) {
+        // log('not calling queue because not enough time has passed (' + timeRemaining + ' < ' + ieMsgDelay + ') last time was ' + ieLastMsgTime);
+        ieMsgTimer = setTimeout(ieRunQueue, ieMsgDelay - timeRemaining + 3);
         return;
       }
 
       // is this needed?
       ieMsgTimer = 0;
 
-      console.log('executing queue of ' + ieCallQueue.length + ' calls');
+      // log('executing queue of ' + ieCallQueue.length + ' calls');
 
       // execute call queue
       for (; i < j; i++) {
@@ -1400,7 +1427,7 @@ SubEtha Message Bus (se-msg)
 
     // add client to given (drop/join) queue and run queue later
     function queueNetworkChange(client, queue) {
-      console.log('change queued for client ' + client.id.substr(0,4));
+      // log('network change queued for client ' + client.id.substr(0,4));
       queue[client.id] = client;
       clearTimeout(networkChangeTimer);
       // allow 5ms of additional client activity
@@ -1444,8 +1471,11 @@ SubEtha Message Bus (se-msg)
         fireDropEvent(client);
       }
 
+      log('broadcastNetworkChanges');
+
       // only notify when there are joins or drops
       if (joins.length || drops.length) {
+        log('added ' + joins.length + ' and dropped ' + drops.length + ' peers');
         // convert channels to arrays
         clients = [];
         for (channelId in channels) {
@@ -1458,7 +1488,7 @@ SubEtha Message Bus (se-msg)
             }
           }
         }
-        console.log('updating "net" key map');
+        // log('updating "net" key map');
         // store channels directly
         setStorage(netKey, JSONstringify(clients));
 
@@ -1472,7 +1502,7 @@ SubEtha Message Bus (se-msg)
           queueCall(msgHost, ['net', payload]);
         }
       } else {
-        console.log('no client changes to share');
+        log('no client changes to share');
       }
     }
 
@@ -1576,6 +1606,22 @@ SubEtha Message Bus (se-msg)
         delete bridgeChannels[channelName][clientId];
         // decremenet bridge channel tally
         bridgeChannelCnts[channelName]--;
+      }
+    }
+
+    // register new network clients
+    function addNewNetworkClients(clients) {
+      var
+        ln = clients.length,
+        client
+      ;
+      while (ln--) {
+        client = clients[ln];
+        // only register add unknown clients
+        if (!protoHas.call(networkClients, client.id)) {
+          log('registering existing network client: ' + client.id);
+          registerNetworkClient(new NetworkClient(client));
+        }
       }
     }
 
@@ -1694,6 +1740,100 @@ SubEtha Message Bus (se-msg)
       bridge.init(evt.data);
     }
 
+    // capture snapshot of network
+    function initPeers() {
+      var
+        allClients,
+        bmap,
+        bid;
+
+      log('retreiving peer network');
+
+      // retrieve existing clients
+      if (isIE) {
+        // via manifest
+
+        // get manifest for the first time
+        ieGetManifest();
+
+        // capture current bridge ticks
+        // the reference will be destroyed/cloned, when the manifest is retrieved again
+        ieBridgeTicks = ieManifest.m;
+
+        // capture current bridge ids
+        // the reference will be destroyed/cloned, when the manifest is retrieved again
+        ieBridgeIds = ieManifest.b;
+
+        // prep to build clients JSON string
+        allClients = [];
+        // merge network maps from each bridge
+        for (bid in ieManifest.b) {
+          if (protoHas.call(ieManifest.b, bid)) {
+            // get json string and remove array brackets
+            bmap = ieGetBridgeClientMapAsString(bid).slice(1,-1);
+            if (bmap) {
+              // add if valid
+              allClients.push(bmap);
+            }
+          }
+        }
+        // join and wrap in expected array brackets
+        allClients = '[' + allClients.join(',') + ']';
+
+      } else {
+        // via storage
+
+        // get network channels
+        allClients = getStorage(netKey);
+      }
+
+      // create client instances
+      if (isFullString(allClients) && allClients.length > 2) {
+        try {
+          allClients = JSONparse(allClients);
+        } catch (e) {
+          if (isIE) {
+            /*
+              one of the storage keys was malformed.
+              what do we do?
+
+              1. do we kill the offending storage key - so no other bridge goes through this?
+              2. message the bridge and tell them to update it themselves?
+              3. tell other bridges to drop those clients?
+              4. all of the above??
+            */
+            log('init: could not parse clients list from cookie');
+          } else {
+            LS.removeItem(netKey);
+            // exit? fail? log?
+          }
+        }
+
+        // initilialize client instances
+        if (isArray(allClients)) {
+          log('adding ' + allClients.length + ' peers');
+          addNewNetworkClients(allClients);
+        } else {
+          log('no peers on network');
+        }
+      }
+
+
+      if (!isIE910) {
+        setInterval(function () {
+          if (now() - ieLastMsgTime > 95) {
+            ieCheckManifest();
+            if (ieNetworkBuffer.length) {
+              // log('periodic check found ' + ieNetworkBuffer.length + ' items  in the queue');
+              ieRunQueue();
+            }
+          }
+        }, 100);
+      }
+
+      initedPeers = 1;
+    }
+
     // manage request to authorize clients
     function AuthRequest(clientData, mid) {
       var me = this;
@@ -1718,6 +1858,11 @@ SubEtha Message Bus (se-msg)
 
         removePendingAuthRequest(me);
 
+        // if first lookup of peers
+        if (!initedPeers) {
+          initPeers();
+        }
+
         // respond to auth request and send existing peers
         msgHost('auth', {
           id: clientId,
@@ -1726,6 +1871,9 @@ SubEtha Message Bus (se-msg)
         });
 
         client = new BridgeClient(clientData);
+
+        // this should be this simple
+        // client.join();
 
         // immediatley track this client
         registerBridgeClient(client);
