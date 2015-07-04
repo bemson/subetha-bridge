@@ -42,19 +42,15 @@ SubEtha Message Bus (se-msg)
   function initSubEthaBridge() {
 
     var
-      // externals
-      cipher = new ((inCJS || inAMD) ? require('morus') : scope.Morus)(),
-
       // builtins
       JSONstringify = JSON.stringify,
       JSONparse = JSON.parse,
       LS = localStorage,
       mathRandom = Math.random,
-      stringfromCharCode = String.fromCharCode,
 
       // prototype aliases
-      protoSlice = Array.prototype.slice,
-      protoHas = Object.prototype.hasOwnProperty,
+      hasOwnProperty = Function.prototype.call.bind(Object.prototype.hasOwnProperty),
+      arraySlice = Function.prototype.call.bind(Array.prototype.slice),
       protoClientDrop,
 
       // guid
@@ -69,11 +65,11 @@ SubEtha Message Bus (se-msg)
       // security
       initialized = 0,
       destroyed = 0,
+      hostPort,
       backtick = '`',
       lastStamp,
       host = scope.parent,
       speakerKey,
-      r_validClientMsg,
       r_validStorageEvent = new RegExp(
         protocolVersion + backtick +
         '[0-9a-f-]{36}' + backtick +
@@ -82,14 +78,13 @@ SubEtha Message Bus (se-msg)
       origin = location.origin || location.protocol + '//' + (location.port ? location.port + ':' : '') + location.hostname,
       storagePfx = protocolVersion + backtick + bridgeId + backtick,
       unsupported =
-        // the parent is this window
+        // not in an iframe
         host === scope ||
-        // has no postmessage
-        typeof host.postMessage != 'function' ||
+        // no message channel
+        typeof MessageChannel != 'function' ||
         // has no localstorage
-        typeof LS != 'object' ||
-        typeof LS.getItem != 'function' ||
-        typeof LS.setItem != 'function',
+        typeof LS != 'object'
+      ,
 
       // versioned localstorage keys
       netKey = protocolVersion + '-net',
@@ -134,31 +129,8 @@ SubEtha Message Bus (se-msg)
       CLIENT_RSP_MISSING_CHANNEL = 1,
       CLIENT_RSP_MISSING_COMMAND = 1,
 
-      // post message utility flag
-      canPostObjects = !!function () {
-        var yes = 1;
-
-        // synchronous check for postMessage object support!
-        // thx gregers@http://stackoverflow.com/a/20743286
-        try {
-          scope.postMessage({
-            toString: function () {
-              yes = 0;
-            }
-          }, '*');
-        } catch (e) {}
-
-        return yes;
-      }(),
-
-      // postmessage
-      postMessage = canPostObjects ?
-        function (msg) {
-          host.postMessage(msg, '*');
-        } :
-        function (msg) {
-          host.postMessage(JSONstringify(msg), '*');
-        },
+      // placeholder for MessagePort postMessage utility
+      postMessage,
 
       // flow control
       next =
@@ -220,7 +192,7 @@ SubEtha Message Bus (se-msg)
             // type is a string
             isFullString(msg.type) &&
             // comes from a registered client
-            protoHas.call(bridgeClients, msg.from)
+            hasOwnProperty(bridgeClients, msg.from)
           ) {
             // get initial queue length - before adding our event
             initialLength = relayQueue.length;
@@ -268,8 +240,8 @@ SubEtha Message Bus (se-msg)
 
           // exit/ignore when already joined or authing
           if (
-            protoHas.call(pendingAuthReqs, clientId) ||
-            protoHas.call(networkClients, clientId)
+            hasOwnProperty(pendingAuthReqs, clientId) ||
+            hasOwnProperty(networkClients, clientId)
           ) {
             return CLIENT_RSP_DUPLICATE;
           }
@@ -286,8 +258,8 @@ SubEtha Message Bus (se-msg)
 
           // if there are no listeners for this event
           if (
-            !protoHas.call(bridge, '_evts') ||
-            !protoHas.call(bridge._evts, AUTH_EVENT) ||
+            !hasOwnProperty(bridge, '_evts') ||
+            !hasOwnProperty(bridge._evts, AUTH_EVENT) ||
             !bridge._evts[AUTH_EVENT].length
           ) {
             // auto authenticate user (synchronously)
@@ -325,21 +297,21 @@ SubEtha Message Bus (se-msg)
             clientId = payload.msg,
             client;
 
-          if (protoHas.call(bridgeClients, clientId)) {
+          if (hasOwnProperty(bridgeClients, clientId)) {
             // drop registered client
             client = bridgeClients[clientId];
             // immediately remove client from bridge and network
             unregisterBridgeClient(client);
             unregisterNetworkClient(client);
             // if client was never announced
-            if (protoHas.call(joinQueue, clientId)) {
+            if (hasOwnProperty(joinQueue, clientId)) {
               // simply remove from join queue
               delete joinQueue[clientId];
             } else {
               // (otherwise) prepare broadcast network change
               queueNetworkChange(client, dropQueue);
             }
-          } else if (protoHas.call(pendingAuthReqs, clientId)) {
+          } else if (hasOwnProperty(pendingAuthReqs, clientId)) {
             // ignore auth request
             pendingAuthReqs[clientId].ignore();
           }
@@ -409,7 +381,7 @@ SubEtha Message Bus (se-msg)
             clientData = drops[ln];
             clientId = clientData.id;
 
-            if (protoHas.call(networkClients, clientId)) {
+            if (hasOwnProperty(networkClients, clientId)) {
               // get corresponding network client
               client = networkClients[clientId];
               // unregister from network
@@ -478,14 +450,16 @@ SubEtha Message Bus (se-msg)
 
           // disconnect remaining clients
           for (clientId in bridgeClients) {
-            bridgeClients[clientId].drop();
+            if (hasOwnProperty(bridgeClients, clientId)) {
+              bridgeClients[clientId].drop();
+            }
           }
 
-          // stop listening for client commands
-          unbind(scope, 'message', postMessageRouter);
-          // stop listening for local storage commands
+          // stop listening to the port
+          hostPort.onmessage = 0;
+          // stop listening to the network
           unbind(scope, 'storage', localStorageRouter);
-          // stop listening for unload
+          // stop listening to the page
           unbind(scope, 'unload', bridge.destroy);
 
           // detach all events
@@ -503,70 +477,46 @@ SubEtha Message Bus (se-msg)
             LS.removeItem(netKey);
           }
         },
-        // parse token
-        init: function (token) {
-          var
-            pos = protocolVersion.length,
-            ln;
+        // process this postMessage event
+        init: function (evt) {
+          var payload;
 
-          // exit now if already initialized on unsupported platform
+          // exit now if already initialized or the platform is unsupported
           if (initialized || destroyed || unsupported) {
             return;
           }
 
-          // in case this method gets invoked after listening for first ping
+          // remove bind, in case this method gets invoked after the first ping
           unbind(scope, 'message', handleFirstPing);
 
+          // security
           if (
-            !isFullString(token) ||
-            token.substring(0, pos) != protocolVersion
+            // evt is not an object
+            typeof evt != 'object' ||
+            // missing ports
+            !evt.ports ||
+            // bad port
+            (hostPort = evt.ports[0]) ||
+            // invalid payload
+            typeof (payload = evt.data) != 'object'
           ) {
-            next(function () {
-              bridge.fire(ERROR_EVENT, 'invalid initialization token');
-            });
+            fireErrorEvent('bad bootstrap event', evt);
             return;
           }
 
-          // account for first backtick
-          pos++;
-
-          // get speaker key
-          speakerKey = token.substring(pos, token.indexOf(backtick, pos));
-          pos += speakerKey.length + 1;
-
-          // exit if no key
-          if (isNaN(speakerKey)) {
+          // validate payload
+          if (
+            // protocol mismatch
+            payload.protocol != protocolVersion ||
+            // invalid network name
+            !isFullString(bridgeNetworkName = payload.network)
+          ) {
+            fireErrorEvent('invalid payload', payload);
             return;
           }
 
-          speakerKey *= 1;
-
-          // get bridge network name/id
-          bridgeNetworkName = token.substring(pos, token.indexOf(backtick, pos));
-          // get bridge network name/id
-          if (!bridgeNetworkName) {
-            return;
-          }
-
-          // set cipher to remainder of bootstrap token
-          cipher.cipher(token.substring(pos + bridgeNetworkName.length + 1));
-
-          // exit if cipher fails - testing with bridge id
-          if (cipher.decode(cipher.encode(bridgeNetworkName)) !== bridgeNetworkName) {
-            return;
-          }
-
-          // all tests passed!
+          // all checks passed!
           initialized = 1;
-
-          // capture bridge network
-          bridge.network = bridgeNetworkName;
-
-          // create string parser if we can't post objects
-          if (!canPostObjects) {
-            r_validClientMsg = new RegExp('^{"key":' + speakerKey + ',"mid":"[0-9a-f-]{36}","type":".+?","msg":.+}$');
-          }
-
 
           // randomly delay network bootstrap, to reduce startup lag
           // thx https://github.com/mafintosh !
@@ -596,20 +546,29 @@ SubEtha Message Bus (se-msg)
               }
             }
 
-            // listen for client commands
-            bind(scope, 'message', postMessageRouter);
-            // listen for network commands
-            bind(scope, 'storage', localStorageRouter);
-
             // note that we're initialized
             bridge.fire(INITIALIZE_EVENT);
 
+            // exit if we got destroyed
             if (!destroyed) {
-              // listen for when the page closes
-              bind(scope, 'unload', bridge.destroy);
-              // tell host we're ready
-              msgHost('ready', origin);
+              return;
             }
+
+            // listen to host
+            hostPort.onmessage = function (e) {
+              portRouter(e.data);
+            };
+            // listen to network
+            bind(scope, 'storage', localStorageRouter);
+            // listen to page
+            bind(scope, 'unload', bridge.destroy);
+
+            // capture network name
+            bridge.network = bridgeNetworkName;
+
+            // tell host we're ready
+            msgHost('ready', origin);
+
           }, Math.round(mathRandom() * 75));
         },
         on: function (evt, callback) {
@@ -619,11 +578,11 @@ SubEtha Message Bus (se-msg)
             isFullString(evt) &&
             typeof callback == 'function'
           ) {
-            if (!protoHas.call(me, '_evts')) {
+            if (!hasOwnProperty(me, '_evts')) {
               // init events hash
               me._evts = {};
             }
-            if (!protoHas.call(me._evts, evt)) {
+            if (!hasOwnProperty(me._evts, evt)) {
               // init event queue
               me._evts[evt] = [];
             }
@@ -639,12 +598,12 @@ SubEtha Message Bus (se-msg)
             cbLn,
             argLn = arguments.length;
 
-          if (!protoHas.call(me, '_evts') || !argLn) {
+          if (!hasOwnProperty(me, '_evts') || !argLn) {
             // reset if clearing all events
             me._evts = {};
           } else if (
             isFullString(evt) &&
-            protoHas.call(me._evts, evt)
+            hasOwnProperty(me._evts, evt)
           ) {
             cbs = me._evts[evt];
             if (typeof callback == 'function') {
@@ -676,11 +635,11 @@ SubEtha Message Bus (se-msg)
 
           if (
             isFullString(evt) &&
-            protoHas.call(me, '_evts') &&
-            protoHas.call(me._evts, evt) &&
+            hasOwnProperty(me, '_evts') &&
+            hasOwnProperty(me._evts, evt) &&
             (cbLn = (cbs = me._evts[evt]).length)
           ) {
-            params = protoSlice.call(arguments, 1);
+            params = arraySlice(arguments, 1);
             if (params.length) {
               callbackInvoker = function (cb) {
                 cb.apply(me, params);
@@ -711,7 +670,7 @@ SubEtha Message Bus (se-msg)
 
       for (; source = arguments[argIdx]; argIdx++) {
         for (member in source) {
-          if (protoHas.call(source, member)) {
+          if (hasOwnProperty(source, member)) {
             base[member] = source[member];
           }
         }
@@ -725,7 +684,7 @@ SubEtha Message Bus (se-msg)
 
       if (obj && ln) {
         while (ln--) {
-          if (!protoHas.call(obj, keys[ln])) {
+          if (!hasOwnProperty(obj, keys[ln])) {
             return 1;
           }
         }
@@ -738,7 +697,7 @@ SubEtha Message Bus (se-msg)
 
       if (obj && ln) {
         while (ln--) {
-          if (protoHas.call(obj, keys[ln])) {
+          if (hasOwnProperty(obj, keys[ln])) {
             return 1;
           }
         }
@@ -764,22 +723,10 @@ SubEtha Message Bus (se-msg)
       return value && typeof value == 'string';
     }
 
-    // return a random number of random characters, excluding "{", "|", and "}"
-    function randomPadding() {
-      var
-        spaces = [],
-        count = ~~(mathRandom() * 40);
-
-      while (count--) {
-        spaces.push(stringfromCharCode(~~(mathRandom() * 90)));
-      }
-      return spaces.join('');
-    }
-
     // FUNCTIONS
 
     function resolveNetworkChannel(channelName) {
-      if (!protoHas.call(networkChannels, channelName)) {
+      if (!hasOwnProperty(networkChannels, channelName)) {
         networkChannels[channelName] = {};
         networkChannelCnts[channelName] = 0;
       }
@@ -787,7 +734,7 @@ SubEtha Message Bus (se-msg)
     }
 
     function resolveBridgeChannel(channelName) {
-      if (!protoHas.call(bridgeChannels, channelName)) {
+      if (!hasOwnProperty(bridgeChannels, channelName)) {
         bridgeChannels[channelName] = {};
         bridgeChannelCnts[channelName] = 0;
       }
@@ -811,12 +758,12 @@ SubEtha Message Bus (se-msg)
 
       if (!channelName) {
         fromId = msg.from;
-        if (!protoHas.call(networkClients, fromId)) {
+        if (!hasOwnProperty(networkClients, fromId)) {
           // don't relay unknown network clients
           return;
         }
         channelName = networkClients[msg.from].channel;
-        viaNetwork = !protoHas.call(bridgeClients, fromId);
+        viaNetwork = !hasOwnProperty(bridgeClients, fromId);
       }
       // announce message event - allow routines to alter the message
 
@@ -842,39 +789,19 @@ SubEtha Message Bus (se-msg)
     }
 
     // send message to host
-    function msgHost(type, msg, sent) {
-      postMessage(
-        // protocol message
-        [
-          // protocol version
-          protocolVersion,
-          // network id
-          bridgeNetworkName,
-          // encode message
-          cipher.encode(
-            // random head padding
-            randomPadding() +
-            // json the msg
-            JSONstringify({
-              mid: guid(),
-              type: type,
-              sent: sent || new Date(),
-              msg: msg
-            }) +
-            // random tail padding
-            randomPadding()
-          )
-        ]
-        // no origin needed
-      );
-      // alter cipher per message
-      cipher.shift++;
+    function msgHost(type, data, sent) {
+      portHost.postMessage({
+        mid: guid(),
+        type: type,
+        sent: sent || new Date(),
+        data: data
+      });
     }
 
     function hasBridgeClient(ids) {
       var i = ids.length;
       while (i--) {
-        if (protoHas.call(bridgeClients, ids[i])) {
+        if (hasOwnProperty(bridgeClients, ids[i])) {
           return 1;
         }
       }
@@ -948,8 +875,8 @@ SubEtha Message Bus (se-msg)
       // take command off queue and create client message request
       request = new RelayRequest(relayQueue.shift());
       if (
-        !protoHas.call(bridge, '_evts') ||
-        !protoHas.call(bridge._evts, RELAY_EVENT) ||
+        !hasOwnProperty(bridge, '_evts') ||
+        !hasOwnProperty(bridge._evts, RELAY_EVENT) ||
         !bridge._evts[RELAY_EVENT].length
       ) {
         request.allow();
@@ -964,7 +891,7 @@ SubEtha Message Bus (se-msg)
 
     function fireJoinEvent(client) {
       // only fire if still joining
-      if (protoHas.call(joinQueue, client.id)) {
+      if (hasOwnProperty(joinQueue, client.id)) {
         bridge.fire(JOIN_EVENT, client);
       }
     }
@@ -975,6 +902,18 @@ SubEtha Message Bus (se-msg)
 
     function fireMessageEvent(msg) {
       bridge.fire(MSG_EVENT, msg);
+    }
+
+    function fireErrorEvent(errMsg, errValue) {
+      var errArgs = [ERROR_EVENT, errMsg];
+
+      if (arguments.length > 1) {
+        errArgs[1] = errValue;
+      }
+
+      next(function () {
+        fireEvent.apply(0, errArgs);
+      });
     }
 
     // add client to given (drop/join) queue and run queue later
@@ -1008,17 +947,21 @@ SubEtha Message Bus (se-msg)
       dropQueue = {};
 
       for (clientId in jq) {
-        client = jq[clientId];
-        joins.push(client);
-        fireJoinEvent(client);
+        if (hasOwnProperty(jq, clientId)) {
+          client = jq[clientId];
+          joins.push(client);
+          fireJoinEvent(client);
+        }
       }
       for (clientId in dq) {
-        client = dq[clientId];
-        drops.push({
-          id: clientId,
-          channel: client.channel
-        });
-        fireDropEvent(client);
+        if (hasOwnProperty(dq, clientId)) {
+          client = dq[clientId];
+          drops.push({
+            id: clientId,
+            channel: client.channel
+          });
+          fireDropEvent(client);
+        }
       }
 
       // only notify when there are joins or drops
@@ -1026,9 +969,13 @@ SubEtha Message Bus (se-msg)
         // convert channels to arrays
         allClients = [];
         for (channelId in networkChannels) {
-          channel = networkChannels[channelId];
-          for (clientId in channel) {
-            allClients.push(channel[clientId]);
+          if (hasOwnProperty(networkChannels, channelId)) {
+            channel = networkChannels[channelId];
+            for (clientId in channel) {
+              if (hasOwnProperty(channel, clientId)) {
+                allClients.push(channel[clientId]);
+              }
+            }
           }
         }
         // store network channels
@@ -1050,7 +997,7 @@ SubEtha Message Bus (se-msg)
     function removePendingAuthRequest(request) {
       var clientId = request.client.id;
 
-      if (protoHas.call(pendingAuthReqs, clientId)) {
+      if (hasOwnProperty(pendingAuthReqs, clientId)) {
         delete pendingAuthReqs[clientId];
       }
     }
@@ -1149,68 +1096,6 @@ SubEtha Message Bus (se-msg)
       }
     }
 
-    // route "message" events
-    function postMessageRouter(evt) {
-      var
-        cmd = evt.data,
-        cmdType = typeof cmd,
-        cmdName,
-        mid,
-        securedByRegExp = 0,
-        code = CLIENT_RSP_MISSING_COMMAND;
-
-      // capture to cache-bust db changes
-      lastStamp = evt.timeStamp;
-
-      // parser
-      if (
-        !canPostObjects &&
-        cmdType == 'string'
-      ) {
-        // assess json before parsing
-        if (r_validClientMsg.test(cmd)) {
-          try {
-            cmd = JSONparse(cmd);
-            securedByRegExp = 1;
-          } catch (e) {
-            // bad json
-            return;
-          }
-        } else {
-          // malformed msg
-          return;
-        }
-      } else if (cmdType !== 'object') {
-        // bad msg type
-        return;
-      }
-
-      // security
-      if (
-        (
-          // trust regexp test or...
-          securedByRegExp || (
-            // matches key - this supplements origin security
-            cmd.key == speakerKey &&
-            // has a message identifier
-            isFullString((mid = cmd.mid)) &&
-            // has a message
-            protoHas.call(cmd, 'msg')
-          )
-        ) &&
-        // has a known type
-        protoHas.call(postMessageCommands, (cmdName = cmd.type))
-      ) {
-        code = postMessageCommands[cmdName](cmd, evt);
-      }
-
-      // send message receipt
-      // msgHost('receipt', {
-      //   mid: command.mid,
-      //   code: code
-      // });
-    }
-
     // route "storage" events
     function localStorageRouter(evt) {
       var
@@ -1245,9 +1130,9 @@ SubEtha Message Bus (se-msg)
         // not an object
         typeof msg !== 'object' ||
         // message has no msg property
-        !protoHas.call(msg, 'msg') ||
+        !hasOwnProperty(msg, 'msg') ||
         // there is no handler for this message
-        !protoHas.call(localStorageCommands, msg.type)
+        !hasOwnProperty(localStorageCommands, msg.type)
       ) {
         // log?
         return;
@@ -1258,7 +1143,7 @@ SubEtha Message Bus (se-msg)
     }
 
     function handleFirstPing(evt) {
-      bridge.init(evt.data);
+      bridge.init(evt);
     }
 
     // exit now if platform is unsupported
@@ -1422,7 +1307,7 @@ SubEtha Message Bus (se-msg)
           clientId = me.id;
 
         // exit if not a client
-        if (protoHas.call(networkClients, clientId)) {
+        if (hasOwnProperty(networkClients, clientId)) {
 
           unregisterNetworkClient(me);
 
@@ -1472,9 +1357,12 @@ SubEtha Message Bus (se-msg)
     }
     NetworkClient.prototype = new Client();
 
-    if (isFullString(scope._subetha)) {
-      // use namespaced token if present in global
+    // if `_subetha` is present, it is expected to be a (the first) message event received
+    if (scope._subetha) {
+      // use namespaced event if present in global
       bridge.init(scope._subetha);
+      // dereference event
+      scope._subetha = 0;
     } else {
       // await first ping
       bind(scope, 'message', handleFirstPing);
