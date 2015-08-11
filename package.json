@@ -4,7 +4,6 @@
   "description": "Host SubEtha clients and messages",
   "main": "src/subetha-bridge.js",
   "dependencies": {
-    "morus": "1.x"
   },
   "keywords": [
     "subetha",
