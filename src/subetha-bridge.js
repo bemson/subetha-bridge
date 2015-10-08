@@ -102,11 +102,9 @@ SubEtha Message Bus (se-msg)
 
       // identification - cuz IE sux
 
-      isIE9 = /msie\s9/i.test(UA),
-      isIE10 = /msie\s1/i.test(UA),
-      isIE910 = isIE9 && isIE10,
-      isIE11 = !isIE910 && /trident/i.test(UA),
-      isIE = isIE9 || isIE10 || isIE11,
+      isIE10 = /msie\s10/i.test(UA),
+      isIE11 = !isIE10 && /trident/i.test(UA),
+      isIE = isIE10 || isIE11,
 
       // protocol & security
 
@@ -116,8 +114,6 @@ SubEtha Message Bus (se-msg)
       // VARIABLE FUNCTIONS
 
       getBridgeKillDelayFromId,
-      // method name to remove client
-      removeClientFromNetwork,
 
       // GLOBAL/SHARED
 
@@ -245,6 +241,8 @@ SubEtha Message Bus (se-msg)
       w3cRegKey = protocolName + 'r',
       // client key for w3c - when client changes occur
       w3cClientKey = protocolName + 'c',
+      // key to get localStorage back in sync
+      ieKickKey = protocolName + 'k',
 
       // local storage entry point
       // one storage listener for all Server instances
@@ -364,7 +362,7 @@ SubEtha Message Bus (se-msg)
 
           // fork approach, based on platform
 
-          if (isIE910) {
+          if (isIE10) {
 
             _watch = function (me) {
               var scanner = me.scan.bind(me);
@@ -372,11 +370,18 @@ SubEtha Message Bus (se-msg)
               // debounce storage event for 30ms
               me.onstorage = function () {
                 clearTimeout(me.timer);
-                me.timer = setTimeout(scanner, 30);
+                me.timer = setTimeout(scanner, 50);
               };
 
-              // listen to storage events
-              bind(doc, 'storage', me.onstorage);
+              // start interval to kick localStorage every 3 seconds
+              // this is for IE 10
+              // when the runtime doesn't receive a storage event
+              // and localStorage is out of sync
+              me.iv = setInterval(function () {
+                if (bridgeIds.length) {
+                  setStorage(ieKickKey, '');
+                }
+              }, 3000);
 
             };
 
@@ -388,7 +393,7 @@ SubEtha Message Bus (se-msg)
               me.onstorage = setInterval(function () {
                 // scan for changes
                 me.scan();
-              }, 100);
+              }, 200);
 
             };
 
@@ -418,7 +423,8 @@ SubEtha Message Bus (se-msg)
                 }
               };
 
-              bind(scope, 'storage', me.onstorage);
+              // listen to window storage events
+              // bind(scope, 'storage', me.onstorage);
             };
 
           }
@@ -435,6 +441,12 @@ SubEtha Message Bus (se-msg)
             me.scan();
 
             _watch(me);
+
+            if (!isIE11) {
+              // listen to window storage events
+              bind(scope, 'storage', me.onstorage);
+            }
+
           };
         })(),
 
@@ -445,14 +457,13 @@ SubEtha Message Bus (se-msg)
 
           // fork unwatch approach, based on platform
 
-          if (isIE910) {
+          if (isIE10) {
 
             _unwatch = function (me) {
 
               clearTimeout(me.timer);
-
-              // stop listening to document storage events
-              unbind(doc, 'storage', me.onstorage);
+              clearInterval(me.iv);
+              removeStorage(ieKickKey);
 
             };
 
@@ -467,10 +478,11 @@ SubEtha Message Bus (se-msg)
 
             // w3c
 
-            _unwatch = function (me) {
-              // stop listening to window storage events
-              unbind(scope, 'storage', me.onstorage);
-            };
+            _unwatch = noOp;
+            // _unwatch = function () {
+            //   // stop listening to window storage events
+            //   unbind(scope, 'storage', me.onstorage);
+            // };
 
           }
 
@@ -483,6 +495,11 @@ SubEtha Message Bus (se-msg)
             me.watching = 0;
 
             _unwatch(me);
+
+            if (!isIE11) {
+              // stop listening to window storage events
+              unbind(scope, 'storage', me.onstorage);
+            }
 
             me.onstorage = 0;
 
@@ -497,46 +514,75 @@ SubEtha Message Bus (se-msg)
           var
             me = this,
             cache = me.cache,
-            keys = objectKeys(localStorage),
+            keys = [],
             cachedKeys = mix({}, cache.items),
-            ln = keys.length,
+            ln = localStorage.length,
+            i = 0,
             key,
             value,
             oldValue
           ;
 
+          // get all keys first
+          // best approach for ie
+          while (ln--) {
+            key = localStorage.key(ln);
+            // if this is a protocol key...
+            if (!key.indexOf(protocolName)) {
+              // capture for comparing later
+              keys.push(key);
+            }
+          }
+
+          ln = keys.length;
+
+          // exit if there are no keys
+          if (!ln) {
+            return;
+          }
+
           // sort keys
           // this ensures changes are processed in order:
-          //  1 bridges "-123" suffix
-          //  2 channels "-c" suffix (followed by channel name for ie)
-          //  3 messages "-m" suffix
+          //  1 bridges "b"
+          //  2 change "c" (w3c)
+          //  3 drops "d" (ie)
+          //  4 joins "j" (ie)
+          //  5 messages "m"
+          //  6 registry "r" (w3c)
           keys.sort();
 
           // with each storage key
-          while (ln--) {
-            key = keys[ln];
-            // if this is a protocol key...
-            if (!key.indexOf(protocolName)) {
-              // remove from cachedKeys
-              delete cachedKeys[key];
-              // get value (to set)
-              value = getStorage(key);
-              // reset old value (in case the key is new)
-              oldValue = null;
-              // update new keys or changed values
-              if (!cache.has(key) || value != (oldValue = cache.get(key))) {
-                // announce update/addition
-                me.push(key, value, oldValue);
-              }
+          for (; i < ln; ++i) {
+            key = keys[i];
+            // remove from cachedKeys
+            delete cachedKeys[key];
+            // get value (to set)
+            value = getStorage(key);
+
+            // if value is null...
+            // ie will _set_ a null value when deleting keys
+            if (value === null || value === undefined) {
+              // announce removal now
+              me.pop(key);
+              // move on to next key
+              continue;
+            }
+
+            // reset old value (in case the key is new)
+            oldValue = null;
+            // update new keys or changed values
+            if (!cache.has(key) || value != (oldValue = cache.get(key))) {
+              // announce update/addition
+              me.push(key, value, oldValue);
             }
           }
 
           // delete any remaining cached keys
-          // since they were not in localstorage
+          // since they were not found in localstorage
           for (key in cachedKeys) {
             if (hasKey(cachedKeys, key)) {
               // announce and remove key
-              me.pop(key, 1);
+              me.pop(key);
             }
           }
 
@@ -742,22 +788,24 @@ SubEtha Message Bus (se-msg)
           data: <guid>                    [msg]
         }
         */
-        drop: function (identifier) {
-          var server = this;
+        drop: function (id) {
+          var
+            server = this,
+            client;
 
           // identifiers beginning with "r" are request identifiers
-          if (requests.has(identifier)) {
+          if (requests.has(id)) {
 
             // additional 1 removes any corresponding client
             // handles when client drops before receiving approved request
-            removeAuthRequest(identifier);
+            removeAuthRequest(id);
 
-          } else if (server.clients.has(identifier)) {
+          } else if (client = server.clients.del(id)) {
 
-            dropClient(server, identifier);
+            removeClient(server, client);
 
           } else {
-            server.log('failed drop request for', identifier);
+            server.log('failed drop request for', id);
           }
 
         }
@@ -1068,7 +1116,7 @@ SubEtha Message Bus (se-msg)
             // bridge is this server
             server.id == bid ||
             // the joining peer has a drop flag
-            LS.has(protocolName + 'd' + bid + '-' + pid) ||
+            LS.has(ieGetPeerDropKey(bid, pid)) ||
             // channel not in server
             !server.channels.has(channelName) ||
             // unknown bridge
@@ -1097,10 +1145,10 @@ SubEtha Message Bus (se-msg)
       // but before there assets have been removed from the IDB
       /*
         // scheduled peer
-        1
+        '' <empty string>
       */
       storageUpdateCmds.push([
-        function (server, isWarrant, matches, dropKey) {
+        function (server, value, matches, dropKey) {
           var
             bid = matches[1],
             pid = matches[2]
@@ -1133,11 +1181,9 @@ SubEtha Message Bus (se-msg)
                 // all from this peer
                 pid,
                 // callback
-                function () {
-                  // delete the drop key from localStorage
-                  // the resulting event informs bridges you've executed this peer
-                  LS.del(dropKey);
-                }
+                // delete the drop key from localStorage
+                // the resulting storage event informs bridges you've executed this peer
+                LS.del.bind(LS, dropKey)
               );
             }, server._delay);
 
@@ -1666,6 +1712,8 @@ SubEtha Message Bus (se-msg)
       // re-calculate this server's delay
       updateServerDelay(server);
 
+      server.fire('added bridge', bridge);
+
       return bridge;
     }
 
@@ -1791,49 +1839,6 @@ SubEtha Message Bus (se-msg)
       return 0;
     }
 
-    // function dropClient(server, clientId) {
-    //   var
-    //     // remove established client
-    //     client = server.clients.del(clientId),
-    //     channelName = client.channel,
-    //     serverChannels = server.channels,
-    //     channel = serverChannels.get(channelName),
-    //     msgTable
-    //   ;
-
-    //   // if last client in channel
-    //   if (channel.length == 1) {
-    //     // remove channel
-    //     serverChannels.del(channelName);
-    //   } else {
-    //     // remove client from channel
-    //     channel.del(clientId);
-    //   }
-    //   // remove entry in IDB, then...
-    //   IDBDropClient(clientId);
-    //   // remove messages from this client
-    //   IDBgetEntries(
-    //     // table ref
-    //     msgTable = DB.transaction('message', 'readwrite').objectStore('message'),
-    //     // index
-    //     'from',
-    //     // only need the key
-    //     1,
-    //     // target entries from client
-    //     clientId,
-    //     function (clientData, key, primaryKey) {
-    //       msgTable.delete(primaryKey);
-    //     },
-    //     isIE
-    //     function () {
-    //       server.unrelay(clientId);
-    //     }
-    //   );
-
-    //   // "inform" network via LS
-    //   server.relay(clientKey, {joins: [], drops: [clientId]});
-    // }
-
     // send non-zero result if given targets are invalid
     function getRecipientCode(server, targets, senderId) {
       var
@@ -1868,15 +1873,6 @@ SubEtha Message Bus (se-msg)
 
     }
 
-    // performs and returns IDB `delete`
-    // returns delete request
-    function IDBDropClient(clientId) {
-      return DB
-        .transaction('client', 'readwrite')
-        .objectStore('client')
-        ['delete'](clientId);
-    }
-
     // add peer to new or existing bridge
     function addPeer(server, peer) {
       var
@@ -1891,7 +1887,7 @@ SubEtha Message Bus (se-msg)
       // is this index needed?
       bridge.channels.branch(channelName).set(pid, peer);
       // add to network channel
-      network.channels.get(channelName).set(pid, peer);
+      network.channels.branch(channelName).set(pid, peer);
       // add to network peers
       network.clients.set(pid, peer);
     }
@@ -1939,15 +1935,20 @@ SubEtha Message Bus (se-msg)
 
     // retrieve or create a channel
     function resolveNetworkChannel(server, channelName) {
-      var networkChannels = server.network.channels;
+      var
+        networkChannels = server.network.channels,
+        networkChannel
+      ;
 
       // return existing channel
       if (networkChannels.has(channelName)) {
         return networkChannels.get(channelName);
       }
 
-      // return new network channel
-      return networkChannels.set(channelName, new NetChannel(server, channelName));
+      // return & load new network channel
+      networkChannel = new NetChannel(server, channelName);
+      networkChannel.load();
+      return networkChannels.set(channelName, networkChannel);
     }
 
     function w3cResolveRegistryChannel(server, channelName) {
@@ -2113,6 +2114,29 @@ SubEtha Message Bus (se-msg)
       return pid;
     }
 
+    // remove from server channels and clients
+    function removeClient(server, client) {
+      var
+        channelName  = client.channel,
+        serverChannels = server.channels,
+        channel = serverChannels.get(channelName)
+      ;
+
+      // relay drop to network
+      server.relayDrop(client);
+
+      // if there is more than one hosted client in this channel...
+      if (channel.length > 1) {
+        // remove client from channel
+        channel.del(id);
+      } else {
+        // remove server channel
+        serverChannels.del(channelName);
+        // remove network channel
+        server.network.channels.del(channelName);
+      }
+    }
+
     // delegate unload event
     function delegateUnloadEvent() {
       systemBus.fire('unload');
@@ -2122,7 +2146,7 @@ SubEtha Message Bus (se-msg)
     // handle storage key addition or update
     function handleStorageEvent(key, value) {
       var
-        storageCmds = (value === null || value == undefined) ? storageRemovalCmds : storageUpdateCmds,
+        storageCmds = (value === null || value === undefined) ? storageRemovalCmds : storageUpdateCmds,
         ln = storageCmds.length,
         cmd,
         challenge,
@@ -2130,7 +2154,7 @@ SubEtha Message Bus (se-msg)
       ;
 
       // loop over local storage key matches
-      while (--ln) {
+      while (ln--) {
         // alias command
         cmd = storageCmds[ln];
         // capture key challenge
@@ -2155,77 +2179,6 @@ SubEtha Message Bus (se-msg)
         }
       }
     }
-
-    /*
-      if (hasKey(localStorageCommands, key)) {
-
-        // when a known key updates...
-        //  - message key prompts IDB read
-        //  - channel key (w3c) updates partial network
-
-        // if storage value is valid...
-        if (hasKey(value, 'bid') && hasKey(value, 'data')) {
-          // handle with pre-built command
-          localStorageCommands[key].call(server, value.bid, value.data);
-        }
-
-      } else if (parts = key.match(r_bridgeKey)) {
-
-        // when a bridge key updates...
-        // - bridge has been added
-        // - bridge has expired
-
-        // we must determine if it's a new or expired bridge
-
-        // alias bridge id
-        bid = parts[1];
-        // parse bridge details from value
-        bridge = hydrateBridgeFromStorageKey(bid, value);
-
-        // if this is a death warrant...
-        if (bridge.dead) {
-          // kill local bridge network now
-          // schedules burial later, based on when it died
-          killBridge(server, bid, bridge.died);
-        } else {
-          // add bridge if it does not already exist
-          addBridge(server, bridge);
-        }
-
-      } else if (
-        parts = key.match(r_iePeerJoin) &&
-        value &&
-        (bid = parts[1]) != server.id &&
-        server.bridges.has(bid) &&
-        typeof value == 'object'
-      ) {
-
-        // a client was added to the network
-        //
-
-        // add id to client object
-        value.id = parts[2];
-        // process joined client
-        handleJoinedClient(server, bid, value);
-
-
-      } else if (parts = key.match(r_ieChannelKey)) {
-
-        // when a channel key updates (on IE)...
-        // - reconcile the given channel via IDB
-
-        // get channel
-        channelName = parts[1];
-
-        // if this is an existing server channel
-        if (server.channels.has(channelName)) {
-          // update network channel
-          resolveNetworkChannel(server, channelName).load();
-        }
-
-      }
-
-    */
 
     // relay array of messages for this server's clients
     function readMessages(entries, cnt, lastKey) {
@@ -2571,9 +2524,6 @@ SubEtha Message Bus (se-msg)
 
       me.server = server;
       me.name = channelName;
-
-      // load network peers
-      me.load();
     }
     // extend hash
     NetChannel.prototype = new Hash();
@@ -2630,8 +2580,8 @@ SubEtha Message Bus (se-msg)
             // flesh out peer members
             peer.id = pid;
             peer.bid = bid;
-            // capture to channel hash
-            me.set(pid, peer);
+            // add to network
+            addPeer(server, peer);
           }
 
         });
@@ -2670,9 +2620,9 @@ SubEtha Message Bus (se-msg)
             bid = registryPeer.bid;
             // if peer is from known bridge...
             if (bridges.has(bid)) {
-              // clone & capture peer to channel hash
+              // clone & add peer to network
               // registry objects can't be augmented
-              me.set(pid, {
+              addPeer(server, {
                 id: pid,
                 bid: bid,
                 stamp: registryPeer.stamp,
@@ -2680,7 +2630,7 @@ SubEtha Message Bus (se-msg)
               });
             } else {
               // (cleanly) remove expired peer
-              delete w3cDeregisterPeer(server, channelName, pid);
+              w3cDeregisterPeer(server, channelName, pid);
             }
           }
         }
@@ -2803,39 +2753,6 @@ SubEtha Message Bus (se-msg)
 
         server.getEntries('message', readMessages, server._lastKey);
       },
-
-      // getEntries: function (tableName, indexName, rangeKey, onFound, onDone) {
-      //   var
-      //     server = this,
-      //     dbq = server.dbq,
-      //     dbLocks = server.locks
-      //   ;
-
-      //   // if a read of this table is already queued...
-      //   if (dbLocks[tableName]) {
-      //     // run queue now
-      //     dbq.run();
-      //   } else {
-
-      //     // (otherwise) when this table is not queued to be read
-
-      //     // add lock for this table name - the value doesn't matter
-      //     dbLocks[tableName] = 1;
-
-      //     // queue call to read table
-      //     dbq.add(function (queueDone) {
-      //       // release lock
-      //       dbLocks[tableName] = 0;
-      //       // get entries
-      //       IDBgetEntries(
-      //         tableName,
-      //         callback,
-      //         startingBound,
-      //         queueDone
-      //       );
-      //     });
-      //   }
-      // },
 
       // writes key and destroy self if it fails
       setKey: function (key, value) {
@@ -3284,3 +3201,4 @@ SubEtha Message Bus (se-msg)
   typeof exports != 'undefined', // node test
   localStorage, Array, Date, Math, navigator.userAgent, this
 );
+
