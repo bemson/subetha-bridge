@@ -114,6 +114,7 @@ SubEtha Message Bus (se-msg)
       // VARIABLE FUNCTIONS
 
       getBridgeKillDelayFromId,
+      testNonTargetedMsg,
 
       // GLOBAL/SHARED
 
@@ -379,7 +380,7 @@ SubEtha Message Bus (se-msg)
               // and localStorage is out of sync
               me.iv = setInterval(function () {
                 if (bridgeIds.length) {
-                  setStorage(ieKickKey, '');
+                  setStorage(ieKickKey, 1);
                 }
               }, 3000);
 
@@ -437,7 +438,8 @@ SubEtha Message Bus (se-msg)
             }
             me.watching = 1;
 
-            // cache storage protocol keys
+            // baseline scan of storage keys
+            // future changes will become custom events
             me.scan();
 
             _watch(me);
@@ -470,7 +472,6 @@ SubEtha Message Bus (se-msg)
           } else if (isIE11) {
 
             _unwatch = function (me) {
-              // just start looping now
               clearInterval(me.onstorage);
             };
 
@@ -825,39 +826,40 @@ SubEtha Message Bus (se-msg)
           {
             bid: <int>,
             data: {
-              key: <int>,       // primary-key of last message written by this bridge
+              key: <int>,       // primary-key of last message in this channel
               channel: <string>
             }
           }
 
-          // ie payload - just a string
-          <date>
+          // ie payload - last known primary key
+          <int>
         */
         [
           isIE ?
             // ie - simply re-read all messages
-            function (server) {
-              server.readMsgs();
+            function (server, payload) {
+              // capture target primary key
+              server.tpk = payload;
+              // attempt reading msgs
+              server.readMsgs(server);
             } :
             // w3c -  read messages up to given key for this channel
             function (server, payload) {
               var
-                event = payload.data,
-                channel = server.channels.get(event.channel)
+                data = payload.data,
+                channelName = data.channel,
+                channel = server.channels.get(channelName)
               ;
-              // exit if server is not known
+              // if bridge and channel are known
               if (
-                // unknown channel
-                !channel ||
-                // unknown bridge
-                !server.bridges.has(value.bid)
+                channel &&
+                server.bridges.has(payload.bid)
               ) {
-                return;
+                // capture target message key
+                channel.tpk = data.key;
+                // capture latest primary key
+                server.readMsgs(channel, channelName);
               }
-              // capture target message key
-              channel.tgtKey = event.key;
-              // capture latest primary key
-              server.readMsgs(channel);
             },
           // string challenge
           1,
@@ -1095,6 +1097,12 @@ SubEtha Message Bus (se-msg)
           (totalBridgeCnt - bridgeIds.indexOf(bid)) * 50;
       };
 
+
+      // allow messages from a given channel
+      testNonTargetedMsg = function (server, channelName) {
+        return server.hasChannel(channelName);
+      };
+
       // set ie specific storage update handlers
 
       // peer joined channel
@@ -1226,6 +1234,13 @@ SubEtha Message Bus (se-msg)
       // wait shortest possible time, based on order
       getBridgeKillDelayFromId = function(bid) {
         return 200 + bridgeIds.indexOf(bid) * 40;
+      };
+
+      // allow all non-targeted messages to pass-thru
+      // w3c reads are already channel specific
+      // no need for further testing
+      testNonTargetedMsg = function () {
+        return 1;
       };
 
       // set w3c specific storage update handlers
@@ -1517,6 +1532,7 @@ SubEtha Message Bus (se-msg)
         entries = {},
         cnt = 0,
         lastKey,
+        lastPrimaryKey,
         trans,
         table,
         cursorType = 'openCursor',
@@ -1574,8 +1590,6 @@ SubEtha Message Bus (se-msg)
 
       openRequest.onsuccess = function () {
         var
-          lastKey,
-          lastPrimaryKey,
           cursor = this.result,
           value
         ;
@@ -1597,17 +1611,24 @@ SubEtha Message Bus (se-msg)
           if (onFound(value, lastKey, lastPrimaryKey, table, cnt)) {
             // stop iterating
             trans.abort();
+            // invoke completion callback
+            complete();
           } else {
             // advance to next entry
             cursor['continue']();
           }
 
         } else {
-          // inform manager that all entries have been retrieved
-          onDone(entries, lastKey, lastPrimaryKey, table, cnt);
+          complete();
         }
 
       };
+
+      // final callback
+      function complete() {
+        // inform manager that all entries have been retrieved
+        onDone(entries, lastKey, lastPrimaryKey, table, cnt);
+      }
 
       // return transaction
       return trans;
@@ -1723,6 +1744,7 @@ SubEtha Message Bus (se-msg)
         rid = request.id,
         channelName = request.channel,
         networkChannel = resolveNetworkChannel(server, channelName),
+        localChannel,
         serverId = server.id,
         clientId = guish(),
         client = {
@@ -1740,7 +1762,7 @@ SubEtha Message Bus (se-msg)
       // errors are handled by #relayJoin
       if (server.relayJoin(client, request, networkChannel)) {
         // resolve server branch
-        localChannel = server.channels.branch(channelName);
+        localChannel = resolveLocalChannel(server, channelName);
         // respond to request
         server.respond(request, RSP_ALLOW, {
           id: clientId,
@@ -1949,6 +1971,26 @@ SubEtha Message Bus (se-msg)
       networkChannel = new NetChannel(server, channelName);
       networkChannel.load();
       return networkChannels.set(channelName, networkChannel);
+    }
+
+    function resolveLocalChannel(server, channelName) {
+      var
+        serverChannels = server.channels,
+        channel
+      ;
+
+      if (serverChannels.has(channelName)) {
+        return serverChannels.get(channelName);
+      }
+
+      channel = serverChannels.branch(channelName);
+
+      // set primary key trackers- - for reading
+      channel.tpk =
+      channel.lpk =
+        0;
+
+      return channel;
     }
 
     function w3cResolveRegistryChannel(server, channelName) {
@@ -2177,53 +2219,6 @@ SubEtha Message Bus (se-msg)
           cmd[0](this, value, proceed, key);
           break;
         }
-      }
-    }
-
-    // relay array of messages for this server's clients
-    function readMessages(entries, cnt, lastKey) {
-      var
-        server = this,
-        clients = server.clients,
-        networkPeers = server.network.clients,
-        channels = server.channels,
-        msgs = [],
-        peer,
-        key,
-        msg
-      ;
-
-      // capture lastKey, for next read
-      server._lastKey = lastKey;
-
-      // only relay message that target this server's clients
-      for (key in entries) {
-        if (hasKey(entries, key)) {
-          msg = entries[key];
-          peer = networkPeers.get(msg.from);
-          // if peer is known and we have clients in this channel...
-          if (peer && channels.has(peer.channel)) {
-            // if broadcast or server has a recipient
-            if (
-              !msg.to ||
-              msg.to.some(targetServerClients)
-            ) {
-              msgs.push(msg);
-            }
-          }
-          // log error if sent from unknown peer?
-          // could occur if clearing old peers is slow
-          // not a real problem, except the message is not received
-        }
-      }
-
-      // if there are messages to send...
-      if (msgs.length) {
-        server.relay(msgs);
-      }
-
-      function targetServerClients(clientId) {
-        return clients.has(clientId);
       }
     }
 
@@ -2638,7 +2633,11 @@ SubEtha Message Bus (se-msg)
     ;
 
     function Server() {
-      var server = this;
+      var
+        server = this,
+        serverClients,
+        serverChannels
+      ;
 
       // all bridge channels and clients
       server.network = {
@@ -2650,9 +2649,21 @@ SubEtha Message Bus (se-msg)
       server.bridges = new Hash();
 
       // local channels
-      server.channels = new Hash();
+      serverChannels =
+      server.channels =
+        new Hash();
       // local clients
-      server.clients = new Hash();
+      serverClients =
+      server.clients =
+        new Hash();
+
+      // prebind has method, for searching clients
+      server.hasClient = serverClients.has.bind(serverClients);
+      // prebind has method, for searching channels
+      server.hasChannel = serverChannels.has.bind(serverChannels);
+
+      // initialize various properties
+      // this allows forking init logic based on browser
       server.initKeys();
     }
 
@@ -2748,10 +2759,78 @@ SubEtha Message Bus (se-msg)
 
       },
 
-      readMsgs: function () {
-        var server = this;
+      readMsgs: function (manager, index) {
+        var
+          server = this,
+          serverChannels = server.channels,
+          hasClient = server.hasClient
+        ;
 
-        server.getEntries('message', readMessages, server._lastKey);
+        // exit if reading
+        if (manager.reading) {
+          return;
+        }
+
+        // init manager flags
+        if (!manager.lpk) {
+          // init target and last primary key values
+          manager.lpk =
+          manager.tpk =
+          // reading flag
+          manager.reading =
+            0;
+        }
+
+        // note that we're now reading
+        manager.reading = 1;
+
+        // begin read
+        IDBgetEntries(
+          // table
+          'message',
+          // index
+          index,
+          // key only
+          0,
+          // range to start read
+          IDBKR.lowerbound(manager.lpk),
+          // on found
+          function (msg) {
+            var targets = msg.to;
+
+            if (
+              // targeted message test
+              (targets && targets.some(hasClient)) ||
+              // untargeted message test
+              (!targets && additionalReadTest(server, msg.channel))
+            ) {
+              // pass message to host
+              server.tell('client', msg, msg.stamp);
+            }
+          },
+          // on done reading
+          function (msg, lastKey, lastPrimaryKey) {
+
+            // update reading flag
+            manager.reading = 0;
+
+            // if there is a primaryKey...
+            if (lastPrimaryKey) {
+              // capture last primary key
+              // this becomes the lower bound of the _next_ read
+              manager.lpk = lastPrimaryKey;
+              // if the target primary key is less than the last primary
+              if (manager.tpk > lastPrimaryKey) {
+                // re-read if a notified of a target greater than our end
+                // this is in cases where a bridge adds a message while reading
+                server.readMsgs(manager, index);
+              } else {
+                // (otherwise) just update target for next eventual read
+                manager.tpk = lastPrimaryKey;
+              }
+            }
+          }
+        );
       },
 
       // writes key and destroy self if it fails
@@ -2908,8 +2987,9 @@ SubEtha Message Bus (se-msg)
       // set up keys
       initKeys: isIE ?
         function () {
+          var server = this;
           // array of keys to eventually discard
-          this.ckeys = [];
+          server.ckeys = [];
         } :
         noOp,
 
