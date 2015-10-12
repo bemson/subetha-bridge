@@ -99,6 +99,7 @@ SubEtha Message Bus (se-msg)
       RSP_UNKNOWN_RECIPIENTS = 9,
       RSP_UNKNOWN_SENDER = 10,
       RSP_NETWORK_ERROR = 11,
+      RSP_LOCALSTORAGE_ERROR = 12,
 
       // identification - cuz IE sux
 
@@ -115,6 +116,7 @@ SubEtha Message Bus (se-msg)
 
       getBridgeKillDelayFromId,
       testNonTargetedMsg,
+      makePayloadForMessageRelay,
 
       // GLOBAL/SHARED
 
@@ -680,10 +682,10 @@ SubEtha Message Bus (se-msg)
         // handle client message request
         /*
         event data structure
-        {                                 [payload]
+        {                                 [request]
           mid: <guid>,
           type: 'msg',
-          data: {                         [data]
+          data: {                         [msg]
             type: <string>,
             rid: <guid>,
             from: <guid>,
@@ -692,53 +694,43 @@ SubEtha Message Bus (se-msg)
           }
         }
         */
-        msg: function (request) {
+        msg: function (msg, request, reqType) {
           var
             server = this,
-            serverId = server.id,
             serverClients = server.clients,
             networkClients = server.network.clients,
-            client = serverClients.get(data.from),
-            clientId = client.id,
-            rid = request.rid,
-            recipientId = request.to,
-            senderId = request.from,
-            code = 0
+            rid = msg.rid,
+            recipientId = msg.to,
+            code = 0,
+            client
           ;
-          // exit if the request id is invalid
+          // exit if the message's request-id is invalid
           if (!r_validClientRequestId.test(rid)) {
             // log error on server
             server.log('invalid request id:', rid);
             // can't respond to client without valid request id
             return;
-          } else if (requests.has(rid)) {
-            // log error that this request is a duplicate
-            server.respond(request, RSP_DUPLICATE_ID);
-            // respond to - kill other request?
-            return;
           }
+
+          // target client/sender
+          client = serverClients.get(msg.from);
+          // add rid to request - for handling responses
+          request.rid = rid;
+          // remove rid from msg
+          delete msg.rid;
 
           // validate message
 
+          // if (requestQueue.has(rid)) {
+          //   code = RSP_DUPLICATE_ID;
+          // } else if (!client) {
           if (!client) {
             code = RSP_UNKNOWN_SENDER;
-          } else {
-            // capture recipient code
-            code = getRecipientCode(server, recipientId, senderId);
-            // if recipients are good...
-            if (!code) {
-              // inspect rest of message
-              if (!hasKey(request, 'data')) {
-                code = RSP_MISSING_DATA;
-              } else if (!isFullString(request.type)) {
-                code = RSP_BAD_TYPE;
-              }
-            }
+          } else if (!hasKey(msg, 'data')) {
+            code = RSP_MISSING_DATA;
+          } else if (!isFullString(msg.type)) {
+            code = RSP_BAD_TYPE;
           }
-
-          // add request/request type
-          // this is to respond() with the proper event name
-          request.type = 'request';
 
           // exit if any error code occurs
           if (code) {
@@ -747,37 +739,11 @@ SubEtha Message Bus (se-msg)
           }
 
           // capture send date
-          request.stamp = now();
+          msg.stamp = now();
 
           // add message to relay queue
-          server.rq.push(request);
+          server.relayMsg(request);
 
-          // run relay queue
-          runRelayQueue(server);
-
-          // add message to DB
-          trans = DB.transaction('message', 'readwrite');
-          trans
-            .objectStore('message')
-            .add({
-              bid: serverId,
-              channel: client.channel,
-              data: request.data,
-              from: clientId,
-              stamp: now(),
-              to: recipientId,
-              type: request.type
-            })
-            .onsuccess = function (e) {
-              // capture and return message id to host
-              server.respond(request, RSP_ALLOW, e.target.result);
-            }
-          ;
-          // handle error
-          trans.onerror = function () {
-            // tell host the client request failed
-            server.respond(request, RSP_NETWORK_ERROR);
-          };
         },
 
         // handle the host dropping client
@@ -964,11 +930,11 @@ SubEtha Message Bus (se-msg)
             /*
               // message table
               {
-                +id: <msg-id> db identifier
                 bid: <bridge-id> db foreign key to gateway server
                 channel: <string> arbitrary identifier
                 data: <mixed> arbitrary message data
                 from: <client-id> db foriegn key to originating client
+                id: <msg-id> db identifier
                 stamp: <number> date message was sent
                 to: ( <client-id>[] | 0 ) list of recipients or none
                 type: <string> arbitrary message type
@@ -1102,6 +1068,13 @@ SubEtha Message Bus (se-msg)
       testNonTargetedMsg = function (server, channelName) {
         return server.hasChannel(channelName);
       };
+
+      // return primary key
+      makePayloadForMessageRelay = function (server, msg) {
+        return msg.id;
+      }
+
+
 
       // set ie specific storage update handlers
 
@@ -1242,6 +1215,17 @@ SubEtha Message Bus (se-msg)
       testNonTargetedMsg = function () {
         return 1;
       };
+
+      // return object full object
+      makePayloadForMessageRelay = function (server, msg) {
+        return {
+          bid: server.id,
+          data: {
+            key: msg.id,
+            channel: msg.channel
+          }
+        };
+      }
 
       // set w3c specific storage update handlers
 
@@ -1637,8 +1621,7 @@ SubEtha Message Bus (se-msg)
     function handleAuthRequest(server, request) {
       var
         rid = request.rid,
-        code = 0,
-        req
+        code = 0
       ;
 
       // exit if there is no response id or it does not begin with an "r"
@@ -1675,15 +1658,13 @@ SubEtha Message Bus (se-msg)
         // manually authorize
 
         // create and publish auth handler
-        server.fire(
-          'auth',
-          {
-            allow: authAllow.bind(server, request),
-            deny: authDeny.bind(server, request),
-            channel: request.channel,
-            credentials: request.creds
-          }
-        );
+        server.fire('auth', {
+          allow: authAllow.bind(server, request),
+          deny: authDeny.bind(server, request),
+          channel: request.channel,
+          credentials: request.creds,
+          timestamp: now()
+        });
 
       } else {
 
@@ -1861,38 +1842,38 @@ SubEtha Message Bus (se-msg)
       return 0;
     }
 
-    // send non-zero result if given targets are invalid
-    function getRecipientCode(server, targets, senderId) {
+    // return code indicating where to deliver message
+    // 0 - do not route
+    // 1 - route to host
+    // 2 - route to network (localStorage)
+    // 3 - route to both
+    function getMsgRelayDestinations(server, targets, channelName) {
       var
-        serverClients = server.clients,
-        networkClients = server.network.clients
+        code = 0,
+        network = server.network
       ;
 
-      // exit when recipient is everybody
-      if (targets === 0 || targets === '0') {
-        return 0;
+      // observe specific targets
+      if (targets) {
+        if (targets.some(server.hasClient)) {
+          code += 1;
+        }
+        if (targets.some(network.clients.has.bind(network.clients))) {
+          code += 2;
+        }
+      } else {
+
+        // (otherwise) observe channels with (enough) peers
+
+        if (server.channels.get(channelName).length > 1) {
+          code += 1;
+        }
+        if (network.channels.get(channelName).length) {
+          code += 2;
+        }
       }
 
-      // decline any falsy value
-      if (!targets) {
-        return RSP_UNKNOWN_RECIPIENTS;
-      }
-
-      // ensure targets is an array - to consolidate validation logic
-      if (!isArray(targets)) {
-        targets = [targets];
-      }
-
-      // test all targets
-      if (!targets.some(function (targetId) {
-        return targetId == senderId ||
-          serverClients.has(targetId) ||
-          networkClients.has(targetId);
-      })) {
-        // fail when any one target is not a known peer
-        return RSP_UNKNOWN_RECIPIENTS;
-      }
-
+      return code;
     }
 
     // add peer to new or existing bridge
@@ -2254,7 +2235,7 @@ SubEtha Message Bus (se-msg)
       server.fire('host', evtType, evt.data, evt);
 
       // route to type handler
-      postMessageCommands[evtType].call(server, evt.data, evt);
+      postMessageCommands[evtType].call(server, evt.data, evt, evtType);
 
     }
 
@@ -2301,43 +2282,132 @@ SubEtha Message Bus (se-msg)
       }
     }
 
-    // allows handling next client event
-    function unlockAndRunQueue() {
-      // unlock queue
-      relayQueueLocked = 0;
-      // resume queue next
-      next(runRelayQueue());
-    }
+    function relayClientMessage(relayRequests, request) {
+      var server = this;
 
-    // process next client event
-    function runRelayQueue(server) {
-      var
-        relayQueue = server.rq,
-        relayDeets,
-        request
-      ;
-
-      // exit if queue is closed or there are no messages to relay
-      if (relayQueue.l || !relayQueue.length) {
+      // add new request
+      if (request) {
+        relayRequests.push(request);
+      }
+      // exit if relay queue is active or no requests remain
+      if (relayRequests.active || !relayRequests.length) {
         return;
       }
 
-      // lock queue
-      relayQueue.l = 1;
-      // retrieve relay request
-      relayDeets = relayQueue.shift();
-      // if there are subscribers of this event
+      // (otherwise) handle next request in queue
+
+      // get next request
+      request = relayRequests.shift();
+      // flag that a message is in process
+      relayRequests.active = 1;
+
+      // if messages should be approved..
       if (server._hasSubs('relay')) {
-        // take command off queue and create client message request
-        request = new RelayRequest(relayQueue.shift());
-        wrapRequestMethods(request);
-        // add as pending relay
-        bridge.pendingRelay = request;
-        // announce client event request
-        bridge.fire('relay', request);
+        // publish request as a request
+        server.fire('relay', new RelayRequest(server, relayRequests, request));
       } else {
-        request.allow();
+        deliverClientMessage(server, relayRequests, request);
       }
+
+    }
+
+    function deliverClientMessage(server, relayRequests, request) {
+      var
+        msg = request.data,
+        // determine where we're going
+        // host (1), network (2), both (3) - not neither (0)
+        relayDestinations = getMsgRelayDestinations(
+          server,
+          msg.to,
+          server.clients.get(msg.from).channel
+        ),
+        toNetwork = relayDestinations > 1
+      ;
+
+      // if sending to host or netowrk
+      if (relayDestinations) {
+
+        // if only sending to host
+        if (!toNetwork) {
+          // fake the id now
+          msg.id = guish();
+          // tell host the message was sent
+          // since it's returning to the host
+          server.respond(request, RSP_ALLOW);
+        }
+
+        // deliver msg to network (first) or host
+        (toNetwork ? deliverMsgToNetwork : deliverMsgToHost)(
+          server,
+          request,
+          relayRequests,
+          relayDestinations
+        );
+      } else {
+        // continue to next message
+        // respond that message had bad recipients
+        server.respond(request, RSP_UNKNOWN_RECIPIENTS, msg.to);
+        doneDeliveringMsg(server, relayRequests);
+      }
+    }
+
+    function deliverMsgToNetwork(server, msg, relayRequests, relayDestinations) {
+      var trans = DB.transaction('message', 'readwrite');
+
+      // add client message to IDB
+      trans
+        .objectStore('message')
+        .add(msg)
+        .onsuccess = function (e) {
+          var pkey = e.target.result;
+
+          // capture primary key
+          msg.id = pkey;
+
+          // notify network that a new message is available
+          if (server.setKey(msgKey, makePayloadForMessageRelay(server, msg))) {
+            // inform host of successful write to network
+            server.respond(request, RSP_ALLOW, pkey);
+            // if sending to host also...
+            if (relayDestinations > 2) {
+              // deliver message to host
+              deliverMsgToHost(server, msg, relayRequests);
+            } else {
+              // move on to next msg
+              doneDeliveringMsg(server, relayRequests);
+            }
+          } else {
+            // fail send, when notifying the network fails
+            fail(RSP_LOCALSTORAGE_ERROR);
+          }
+        }
+      ;
+
+      // handle error
+      trans.onerror = function () {
+        fail(RSP_NETWORK_ERROR);
+      };
+
+      function fail(code) {
+        // tell why host the client request failed
+        server.respond(request, code);
+        // move on to next request
+        doneDeliveringMsg(server, relayRequests);
+      }
+    }
+
+    function deliverMsgToHost(server, msg, relayRequests) {
+      // send message to host
+      server.tell('message', msg);
+      // move on to next message
+      doneDeliveringMsg(server, relayRequests);
+    }
+
+    function doneDeliveringMsg(server, relayRequests) {
+      // flag that there is no active message
+      relayRequests.active = 0;
+      // relay next message in a moment
+      next(server.relayMsg);
     }
 
     function makePayloadForChannelRelay(server, type, client) {
@@ -2471,46 +2541,6 @@ SubEtha Message Bus (se-msg)
       }
     });
 
-    function Queue(context) {
-      var q = this;
-
-      q._ary = [];
-      q._o = context;
-
-      q._cb = function () {
-        q.active = 0;
-        q.run();
-      };
-    }
-
-    mix(Queue.prototype, {
-
-      // busy flag for queues
-      active: 0,
-
-      add: function (fn) {
-        var q = this;
-
-        q.ary.push(fn);
-        q.run();
-      },
-
-      clear: function () {
-        this.ary.length = 0;
-      },
-
-      // process first in first out
-      run: function () {
-        var q = this;
-
-        if (!q.active && q.ary.length) {
-          q.active = 1;
-          q.ary.unshift().call(q._o, q._cb);
-        }
-      }
-
-    });
-
     function NetChannel(server, channelName) {
       var me = this;
 
@@ -2635,6 +2665,8 @@ SubEtha Message Bus (se-msg)
     function Server() {
       var
         server = this,
+        // private msg queue
+        relayRequests = [],
         serverClients,
         serverChannels
       ;
@@ -2647,6 +2679,11 @@ SubEtha Message Bus (se-msg)
 
       // all bridges - bridges have clients and channel hashes too
       server.bridges = new Hash();
+
+      // msg handler
+      server.relayMsg = relayClientMessage.bind(server, relayRequests);
+      // active flag of requests queue
+      relayRequests.active = 0;
 
       // local channels
       serverChannels =
@@ -3183,76 +3220,57 @@ SubEtha Message Bus (se-msg)
     });
 
     // manage request to relay client events
-    function RelayRequest(msg) {
-      var me = this;
-      me.msg = msg;
+    function RelayRequest(server, relayRequests, request) {
+      var
+        me = this,
+        msg = request.data,
+        state = {done: 0}
+      ;
+
+      // expose message meta data
+      me.type = msg.type;
+      me.from = msg.from;
+      me.to = msg.to ? msg.to.concat() : 0;
+      me.timestamp = msg.stamp;
+
+      // pre-bind methods
+      me.allow = me.allow.bind(server, relayRequests, request, state);
+      me.deny = me.deny.bind(server, relayRequests, request, state);
     }
 
     mix(RelayRequest.prototype, {
 
-      allow: function () {
-        var
-          me = this,
-          msg = me.msg,
-          relayed = 0,
-          sender = bridgeClients[msg.from],
-          recipients = msg.to,
-          isBroadcast = !recipients,
-          channelName = sender.channel,
-          bridgePeerCount = bridgeChannelCnts[channelName],
-          networkPeerCount = networkChannelCnts[channelName]
-        ;
-
-        // remove this relay request
-        bridge.pendingRelay = null;
-
-        // only relay if there are other clients in this channel
-        if (networkPeerCount > 1) {
-          // relay back to host when...
-          if (
-            // there are other channel clients on this bridge
-            bridgePeerCount > 1 &&
-            // and...
-            (
-              // this is a broadcast
-              isBroadcast ||
-              // or a recipient is on this bridge
-              hasAtLeastOneKey(bridgeClients, recipients)
-            )
-          ) {
-            relayToHost(msg);
-            relayed = 1;
-          }
-
-          // only relay to network when...
-          if (
-            // there are more clients outside this bridge
-            bridgePeerCount < networkPeerCount &&
-            // and...
-            (
-              // this is a broadcast
-              isBroadcast ||
-              // or, some recipients are not local
-              hasNotAtLeastOneKey(bridgeClients, recipients)
-            )
-          ) {
-            // relay message to network
-            broadcast('client', msg);
-            relayed = 1;
-          }
-
-          // if anything got relayed
-          if (relayed) {
-            fireMessageEvent(msg);
-          }
-
+      allow: function (relayRequests, request, state) {
+        // exit with false if done
+        if (state.done) {
+          return false;
         }
-        unlockAndRunQueue();
+
+        // flag that this request is done
+        state.done = 1;
+
+        // deliver the message
+        deliverClientMessage(this, relayRequests, requests);
+        return true;
       },
 
-      deny: unlockAndRunQueue,
+      deny: function (relayRequests, request, state) {
+        var server = this;
 
-      ignore: unlockAndRunQueue
+        // exit with false if done
+        if (state.done) {
+          return false;
+        }
+
+        // flag that this request is done
+        state.done = 1;
+
+        // deny sending this message
+        server.respond(request, RSP_DENIED);
+        doneDeliveringMsg(server, relayRequests);
+
+        return true;
+      },
 
     });
 
