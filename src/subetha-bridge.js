@@ -802,8 +802,8 @@ SubEtha Message Bus (se-msg)
             authReqId,
             client;
 
-          // identifiers beginning with "r" are request identifiers
-          if (typeof id == 'string' && authRequests.has(authReqId = server.id + id)) {
+          // if dropping a request
+          if (authRequests.has(authReqId = server.id + id)) {
 
             // presence of request means it has not been handled
             // removing also marks request as done
@@ -1707,7 +1707,7 @@ SubEtha Message Bus (se-msg)
     // begin adding this client
     function addClient(server, request) {
       var
-        rid = request.id,
+        rid = request.rid,
         channelName = request.channel,
         networkChannel = resolveNetworkChannel(server, channelName),
         localChannel,
@@ -1747,7 +1747,7 @@ SubEtha Message Bus (se-msg)
         server.on('host', function authVerifier(type, data, payload) {
 
           // if a client command occurs for this client...
-          if (type == 'msg' && data.id == clientId) {
+          if (type == 'msg' && data.from == clientId) {
             // the host is referencing the client with the returned id
             // so we can remove this check
             removeVerifier();
@@ -1787,7 +1787,7 @@ SubEtha Message Bus (se-msg)
       }
 
       // remove and mark request done
-      removeAuthRequest(server.id + rid);
+      removeAuthRequest(server.id + request.rid);
 
       addClient(server, request);
 
@@ -1803,7 +1803,7 @@ SubEtha Message Bus (se-msg)
       }
 
       // remove and mark request done
-      removeAuthRequest(server.id + rid);
+      removeAuthRequest(server.id + request.rid);
 
       server.respond(request, RSP_DENIED);
 
