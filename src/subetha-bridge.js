@@ -96,12 +96,13 @@ SubEtha Message Bus (se-msg)
       RSP_DUPLICATE_ID = 6,
       RSP_MISSING_CHANNEL = 7,
       RSP_MISSING_DATA = 8,
+      RSP_MISSING_AUTH_URL = 13,
       RSP_UNKNOWN_RECIPIENTS = 9,
       RSP_UNKNOWN_SENDER = 10,
       RSP_NETWORK_ERROR = 11,
       RSP_LOCALSTORAGE_ERROR = 12,
 
-      // identification - cuz IE sux
+      // sniffing - cuz IE stinx
 
       isIE10 = /msie\s10/i.test(UA),
       isIE11 = !isIE10 && /trident/i.test(UA),
@@ -112,7 +113,7 @@ SubEtha Message Bus (se-msg)
       protocolVersion = 1,
       protocolName = 'se' + protocolVersion,
 
-      // VARIABLE FUNCTIONS
+      // FORKED FUNCTIONS
 
       getBridgeKillDelayFromId,
       testNonTargetedMsg,
@@ -133,7 +134,7 @@ SubEtha Message Bus (se-msg)
       iePeerWarrants = {},
       messageTick = 0,
       hashIgnoreFlag = {},
-      requests = new Hash(),
+      authRequests = new Hash(),
       serverInsts = new Hash(),
       deadBridges = new Hash(),
       emitterPrototype = {
@@ -252,6 +253,7 @@ SubEtha Message Bus (se-msg)
       // (there would only ever be one, of course)
       // minimally normalizes localStorage change events
       // so that Server subscriber logic can be the same
+      // THIS CAN BE A SEPARATE MODULE! :-)
       LS = {
 
         // cached localstorage values
@@ -647,36 +649,79 @@ SubEtha Message Bus (se-msg)
         {                                 [payload]
           mid: <int>,
           type: 'auth',
-          data: [                         [data]
-            // request object
-            {
-              rid: <request-id>,
-              channel: <channel-name>,
-              creds: [ <credential>, ... ]
-            },
-            ...
-          ]
+          data: {                         [request]
+            rid: <request-id>,
+            channel: <channel-name>,
+            creds: [ <credential>, ... ],
+            url: <string>
+          }
         }
         */
-        auth: function (requests) {
+        auth: function (request) {
           var
             server = this,
-            i = 0,
-            j,
-            request
+            rid = request.rid,
+            code = 0,
+            authReqId
           ;
-          // ensure we're working with an array
-          if (!isArray(requests)) {
-            requests = [requests];
+
+          // exit if there is no response id or it does not begin with an "r"
+          if (!isFullString(rid) || rid.charAt(0) != 'r') {
+            server.log('auth fail', 'bad auth id: "' + rid + '"');
+            // log how this request couldn't be handled
+            return;
           }
-          // process each client authorization request
-          for (j = requests.length; i < j; ++i) {
-            // exit loop if server is killed midway
-            if (server.state > STATE_READY) {
-              break;
-            }
-            handleAuthRequest(server, requests[i]);
+
+          // validate auth request
+
+          authReqId = server.id + rid;
+
+          if (authRequests.has(authReqId)) {
+            code = RSP_DUPLICATE_ID;
+          } else if (!isFullString(request.channel)) {
+            code = RSP_MISSING_CHANNEL;
+          } else if (!isFullString(request.url)) {
+            code = RSP_MISSING_AUTH_URL;
           }
+
+          // add request type
+          // needed when sending a response
+          request.type = 'auth';
+
+          // exit if any error was found
+          if (code) {
+            server.respond(request, code);
+            return;
+          }
+
+          // if there are auth event listeners
+          if (server._hasSubs('auth')) {
+
+            // manually authorize
+
+            // add "done" flag
+            // setting the member now improves lookup speed
+            request.met = 0;
+
+            // track request
+            authRequests.set(authReqId, request);
+
+            // create and publish auth request handler
+            server.fire('auth', {
+              allow: authAllow.bind(server, request),
+              deny: authDeny.bind(server, request),
+              channel: request.channel,
+              credentials: request.creds
+            });
+
+          } else {
+
+            // auto authorize
+
+            // add client to network now
+            addClient(server, request);
+          }
+
         },
 
         // handle client message request
@@ -758,22 +803,23 @@ SubEtha Message Bus (se-msg)
         drop: function (id) {
           var
             server = this,
+            authReqId,
             client;
 
           // identifiers beginning with "r" are request identifiers
-          if (requests.has(id)) {
+          if (typeof id == 'string' && authRequests.has(authReqId = server.id + id)) {
 
-            // additional 1 removes any corresponding client
-            // handles when client drops before receiving approved request
-            removeAuthRequest(id);
+            // presence of request means it has not been handled
+            // removing also marks request as done
+            removeAuthRequest(authReqId);
 
           } else if (client = server.clients.del(id)) {
 
             removeClient(server, client);
 
-          } else {
+          }/* else {
             server.log('failed drop request for', id);
-          }
+          }*/
 
         }
 
@@ -793,6 +839,7 @@ SubEtha Message Bus (se-msg)
             bid: <int>,
             data: {
               key: <int>,       // primary-key of last message in this channel
+              // to: [<guid>, ...] | 0, - TO DO - reduce bridges need to scan IDB per notice!
               channel: <string>
             }
           }
@@ -1072,7 +1119,7 @@ SubEtha Message Bus (se-msg)
       // return primary key
       makePayloadForMessageRelay = function (server, msg) {
         return msg.id;
-      }
+      };
 
 
 
@@ -1225,7 +1272,7 @@ SubEtha Message Bus (se-msg)
             channel: msg.channel
           }
         };
-      }
+      };
 
       // set w3c specific storage update handlers
 
@@ -1618,64 +1665,6 @@ SubEtha Message Bus (se-msg)
       return trans;
     }
 
-    function handleAuthRequest(server, request) {
-      var
-        rid = request.rid,
-        code = 0
-      ;
-
-      // exit if there is no response id or it does not begin with an "r"
-      if (!isFullString(rid) || rid.charAt(0) != 'r') {
-        server.log('auth fail', 'bad auth id: "' + rid + '"');
-        // log how this request couldn't be handled
-        return;
-      }
-
-      // validate auth request
-
-      if (requests.has(rid)) {
-        code = RSP_DUPLICATE_ID;
-      } else if (!isFullString(request.channel)) {
-        code = RSP_MISSING_CHANNEL;
-      }
-
-      // add request type
-      request.type = 'auth';
-
-      // exit if any error was found
-      if (code) {
-        server.respond(request, code);
-        return;
-      }
-
-      // add to global auth requests
-      // requests stay here until they are completed or cancelled
-      requests.set(rid, request);
-
-      // if there are auth event listeners
-      if (server._hasSubs('auth')) {
-
-        // manually authorize
-
-        // create and publish auth handler
-        server.fire('auth', {
-          allow: authAllow.bind(server, request),
-          deny: authDeny.bind(server, request),
-          channel: request.channel,
-          credentials: request.creds,
-          timestamp: now()
-        });
-
-      } else {
-
-        // auto authorize
-
-        // add client to network now
-        addClient(server, request);
-      }
-
-    }
-
     function hydrateBridgeFromStorageKey(bid, value) {
       var
         dead = value.charAt(0) == 0,
@@ -1726,18 +1715,14 @@ SubEtha Message Bus (se-msg)
         channelName = request.channel,
         networkChannel = resolveNetworkChannel(server, channelName),
         localChannel,
-        serverId = server.id,
         clientId = guish(),
         client = {
           id: clientId,
-          bid: serverId,
+          bid: server.id,
           channel: channelName,
           stamp: now()
         }
       ;
-
-      // remove request
-      requests.del(rid);
 
       // if able to save client and/or tell network
       // errors are handled by #relayJoin
@@ -1759,25 +1744,28 @@ SubEtha Message Bus (se-msg)
         // add to server clients
         server.clients.set(clientId, client);
 
-        // handle case when client attempts a drop
-        // using the request id
-        // and remove when client uses it's true id
+        // handle case when host attempts to drop client using old request
+        // this subscriber is removed when the host:
+        //  1. sends message with client id
+        //  2. drops the client or request
         server.on('host', function authVerifier(type, data, payload) {
 
           // if a client command occurs for this client...
           if (type == 'msg' && data.id == clientId) {
+            // the host is referencing the client with the returned id
+            // so we can remove this check
             removeVerifier();
-          }
-
-          // if a drop call references either this request or client
-          if (type == 'drop' && (data == rid || data == clientId)) {
-            // force the client id - in case it was the request
-            payload.data = clientId;
-            removeVerifier();
-          }
+          } else
+            // or, a drop command references either identifier
+            if (type == 'drop' && (data == rid || data == clientId)) {
+              // the host is referencing the client with the request id
+              // we swap it out for our client id
+              payload.data = clientId;
+              removeVerifier();
+            }
 
           function removeVerifier() {
-            // remove this subscriber
+            // remove this subscriber callback
             server.off('host', authVerifier);
           }
 
@@ -1785,61 +1773,45 @@ SubEtha Message Bus (se-msg)
       }
     }
 
-    function cancelAuthRequest(server, request, code) {
-      var rid = request.id;
-
-      // indicate request is being handled
-      request.begun = 1;
-      server.respond(request, code);
-      removeAuthRequest(server, rid);
-    }
-
-    function removeAuthRequest(server, rid) {
-      var
-        request = requests.del(rid),
-        networkChannel,
-        clientId
-      ;
-
-      if (!request) {
-        return;
+    function removeAuthRequest(authRequestId) {
+      var request = authRequests.del(authRequestId);
+      if (request) {
+        // flag as met, in case this request is still exposed
+        request.met;
+        return request;
       }
-
-      networkChannel = request.nc;
-      // if the associated network channel is not loaded
-      if (!networkChannel.loaded) {
-        // unsubscribe from loaded event
-        networkChannel.off('loaded', request.chcb);
-        // if no other clients need this channel...
-        if (!--networkChannel.waiting) {
-          // kill transaction
-          networkChannel.trans.abort();
-        }
-      }
-
-      // if there is a pending transaction
-      if (request.trans) {
-        // rollback adding client
-        request.trans.abort();
-      }
-
     }
 
     function authAllow(request) {
       var server = this;
-      if (!request.begun) {
-        addClient(server, request);
-        return 1;
+
+      // exit if handled
+      if (request.met) {
+        return false;
       }
-      return 0;
+
+      // remove and mark request done
+      removeAuthRequest(server.id + rid);
+
+      addClient(server, request);
+
+      return true;
     }
 
     function authDeny(request) {
-      if (!request.begun) {
-        cancelAuthRequest(this, request, RSP_DENIED);
-        return 1;
+      var server = this;
+
+      // mark as done, if not already
+      if (request.met) {
+        return false;
       }
-      return 0;
+
+      // remove and mark request done
+      removeAuthRequest(server.id + rid);
+
+      server.respond(request, RSP_DENIED);
+
+      return true;
     }
 
     // return code indicating where to deliver message
@@ -2574,7 +2546,7 @@ SubEtha Message Bus (se-msg)
             pid
           ;
           // if not a peer object
-          // checking "peer" since IE leaves ghost keys
+          // checking "peer" value since IE has ghost keys
           if (peer && (matches = key.match(r_iePeerJoin))) {
             /*
               // peer structure
@@ -2681,7 +2653,9 @@ SubEtha Message Bus (se-msg)
       server.bridges = new Hash();
 
       // msg handler
+      // pre-bound, to pass private "relayRequests" variable
       server.relayMsg = relayClientMessage.bind(server, relayRequests);
+
       // active flag of requests queue
       relayRequests.active = 0;
 
@@ -2894,6 +2868,7 @@ SubEtha Message Bus (se-msg)
       // send response code to host
       respond: function (req, code, body) {
         var
+          server = this,
           rid = req.rid,
           rsp = {
             id: rid,
@@ -2904,10 +2879,8 @@ SubEtha Message Bus (se-msg)
         if (body) {
           rsp.body = body;
         }
-        // remove request
-        requests.del(rid);
-        // tell host
-        this.tell(req.type + '-rsp', rsp);
+        // send code to host
+        server.tell(req.type + '-rsp', rsp);
       },
 
       // update network via localStorage
@@ -3223,9 +3196,11 @@ SubEtha Message Bus (se-msg)
     function RelayRequest(server, relayRequests, request) {
       var
         me = this,
-        msg = request.data,
-        state = {done: 0}
+        msg = request.data
       ;
+
+      // add met flag to request
+      request.met = 0;
 
       // expose message meta data
       me.type = msg.type;
@@ -3234,36 +3209,36 @@ SubEtha Message Bus (se-msg)
       me.timestamp = msg.stamp;
 
       // pre-bind methods
-      me.allow = me.allow.bind(server, relayRequests, request, state);
-      me.deny = me.deny.bind(server, relayRequests, request, state);
+      me.allow = me.allow.bind(server, relayRequests, request);
+      me.deny = me.deny.bind(server, relayRequests, request);
     }
 
     mix(RelayRequest.prototype, {
 
-      allow: function (relayRequests, request, state) {
-        // exit with false if done
-        if (state.done) {
+      allow: function (relayRequests, request) {
+        // exit with false if handled
+        if (request.met) {
           return false;
         }
 
-        // flag that this request is done
-        state.done = 1;
+        // flag that this request has been handled
+        request.met = 1;
 
         // deliver the message
-        deliverClientMessage(this, relayRequests, requests);
+        deliverClientMessage(this, relayRequests, request);
         return true;
       },
 
-      deny: function (relayRequests, request, state) {
+      deny: function (relayRequests, request) {
         var server = this;
 
-        // exit with false if done
-        if (state.done) {
+        // exit with false if handled
+        if (request.met) {
           return false;
         }
 
-        // flag that this request is done
-        state.done = 1;
+        // flag that this request has been handled
+        request.met = 1;
 
         // deny sending this message
         server.respond(request, RSP_DENIED);
