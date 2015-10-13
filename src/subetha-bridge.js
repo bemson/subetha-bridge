@@ -96,7 +96,6 @@ SubEtha Message Bus (se-msg)
       RSP_DUPLICATE_ID = 6,
       RSP_MISSING_CHANNEL = 7,
       RSP_MISSING_DATA = 8,
-      RSP_MISSING_AUTH_URL = 13,
       RSP_UNKNOWN_RECIPIENTS = 9,
       RSP_UNKNOWN_SENDER = 10,
       RSP_NETWORK_ERROR = 11,
@@ -223,7 +222,7 @@ SubEtha Message Bus (se-msg)
           return me;
         }
       },
-      origin =
+      pageOrigin =
         location.origin ||
         location.protocol + '//' + (location.port ? location.port + ':' : '') + location.hostname,
       unsupported =
@@ -652,8 +651,7 @@ SubEtha Message Bus (se-msg)
           data: {                         [request]
             rid: <request-id>,
             channel: <channel-name>,
-            creds: [ <credential>, ... ],
-            url: <string>
+            creds: [ <credential>, ... ]
           }
         }
         */
@@ -680,8 +678,6 @@ SubEtha Message Bus (se-msg)
             code = RSP_DUPLICATE_ID;
           } else if (!isFullString(request.channel)) {
             code = RSP_MISSING_CHANNEL;
-          } else if (!isFullString(request.url)) {
-            code = RSP_MISSING_AUTH_URL;
           }
 
           // add request type
