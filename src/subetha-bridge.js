@@ -885,25 +885,41 @@ SubEtha Message Bus (se-msg)
           0<timestamp>
         */
         [
-          function (server, payload, matches, key) {
-            var
-              // alias bridge id
-              bid = matches[1],
-              // parse bridge details from value
-              bridge = hydrateBridgeFromStorageKey(bid, payload)
-            ;
+          (function () {
 
-            // if this is a death warrant...
-            if (bridge.dead) {
-              // kill local bridge network now
-              // schedules burial later, based on when it died
-              killBridge(server, bid, bridge.died);
-            } else {
-              // add bridge if it does not already exist
-              addBridge(server, bridge);
+            if (isIE) {
+              return sharedBehavior;
             }
 
-          },
+            // w3c
+            return function (server, payload, matches, key) {
+              var bridge = sharedBehavior(server, payload, matches, key);
+              // handle local network registry
+              if (bridge.dead) {
+                w3cDeregisterBridge(server, bridge.id);
+              }
+            };
+
+            function sharedBehavior(server, payload, matches, key) {
+              var
+                // alias bridge id
+                bid = matches[1],
+                // parse bridge details from value
+                bridge = hydrateBridgeFromStorageKey(bid, payload)
+              ;
+
+              // if this is a death warrant...
+              if (bridge.dead) {
+                // kill local bridge network now
+                // schedules burial later, based on when it died
+                killBridge(server, bid, bridge.died);
+              } else {
+                // add bridge if it does not already exist
+                addBridge(server, bridge);
+              }
+              return bridge;
+            }
+          })(),
           // is regxp
           0,
           // "<protocol>b<bridge-id>"
@@ -1301,6 +1317,7 @@ SubEtha Message Bus (se-msg)
           var
             peer = payload.data,
             pid = peer.id,
+            bid = payload.bid,
             channelName = peer.channel,
             registry = server.reg,
             registryChannel,
@@ -1310,7 +1327,7 @@ SubEtha Message Bus (se-msg)
           ;
 
           // skip if bridge is unknown
-          if (!server.bridges.has(payload.bid)) {
+          if (!server.bridges.has(bid)) {
             return;
           }
 
@@ -1318,10 +1335,10 @@ SubEtha Message Bus (se-msg)
 
           // if adding this peer...
           if (isJoin) {
-            w3cRegisterPeer(server, channelName, pid, server.id, peer.stamp);
+            w3cRegisterPeer(server, channelName, pid, bid, peer.stamp);
           } else if (hasKey(registry, channelName)) {
             // (otherwise) if dropping from known channel...
-            w3cDeregisterPeer(registry, channelName, pid);
+            w3cDeregisterPeer(server, channelName, pid);
           }
 
           // if change is for a local, known channel...
@@ -1329,7 +1346,7 @@ SubEtha Message Bus (se-msg)
             // if a joining peer...
             if (isJoin) {
               // add bridge-id to peer
-              peer.bid = payload.bid;
+              peer.bid = bid;
               // capture peer
               addPeer(server, peer);
             } else {
@@ -1746,19 +1763,22 @@ SubEtha Message Bus (se-msg)
         //  2. drops the client or request
         server.on('host', function authVerifier(type, data, payload) {
 
-          // if a client command occurs for this client...
-          if (type == 'msg' && data.from == clientId) {
-            // the host is referencing the client with the returned id
+          // test the incoming command
+          if (
+            // a client command occurs for this client
+            (type == 'msg' && data.from == clientId) ||
+            // or, authing with this same request id
+            (type == 'auth' && data.rid && data.rid == rid)
+          ) {
             // so we can remove this check
             removeVerifier();
           } else
-            // or, a drop command references either identifier
-            if (type == 'drop' && (data == rid || data == clientId)) {
-              // the host is referencing the client with the request id
-              // we swap it out for our client id
-              payload.data = clientId;
-              removeVerifier();
-            }
+          // or, a drop command references either identifier
+          if (type == 'drop' && (data == rid || data == clientId)) {
+            // we ensure it's now our client id
+            payload.data = clientId;
+            removeVerifier();
+          }
 
           function removeVerifier() {
             // remove this subscriber callback
@@ -1870,7 +1890,8 @@ SubEtha Message Bus (se-msg)
         // remove and retrieve from network peers
         peer = network.clients.del(pid),
         bridge,
-        channelName
+        channelName,
+        networkChannel
       ;
 
       if (peer) {
@@ -1881,8 +1902,16 @@ SubEtha Message Bus (se-msg)
         bridge.clients.del(pid);
         // remove from bridge channel
         bridge.channels.get(channelName).del(pid);
-        // remove from network channel
-        network.channels.get(channelName).del(pid);
+        // alias channel
+        networkChannel = network.channels.get(channelName);
+        // if the channel has more than one peer...
+        if (networkChannel.length > 1) {
+          // remove peer from network channel
+          networkChannel.del(pid);
+        } else {
+          // remove entire channel
+          network.channels.del(channelName);
+        }
         // indicate successful removal
         return 1;
       }
@@ -1916,10 +1945,12 @@ SubEtha Message Bus (se-msg)
         return networkChannels.get(channelName);
       }
 
-      // return & load new network channel
-      networkChannel = new NetChannel(server, channelName);
+      // create new network channel
+      networkChannel = networkChannels.set(channelName, new NetChannel(server, channelName));
+      // load channel
       networkChannel.load();
-      return networkChannels.set(channelName, networkChannel);
+      // return channel
+      return networkChannel;
     }
 
     function resolveLocalChannel(server, channelName) {
@@ -1989,6 +2020,45 @@ SubEtha Message Bus (se-msg)
       return registry;
     }
 
+    // loop through register channels and delete peers from this bridge
+    function w3cDeregisterBridge(server, bid) {
+      var
+        registry = server.reg,
+        channelName,
+        channel,
+        pid,
+        peerCnt,
+        removedCnt
+      ;
+      for (channelName in registry) {
+        if (hasKey(registry, channelName)) {
+          // alias channnel
+          channel = registry[channelName];
+          // reset peer counts
+          peerCnt = 0;
+          removedCnt = 0;
+          for (pid in channel) {
+            // remove peers from this bridge
+            if (hasKey(channel, pid)) {
+              // tick peer count
+              ++peerCnt;
+              if (channel[pid].bid == bid) {
+                // tick removed count
+                ++removedCnt;
+                delete channel[pid];
+              }
+            }
+          }
+          // if no more peers...
+          if (peerCnt == removedCnt) {
+            // remove entire channel
+            delete registry[channelName];
+          }
+        }
+      }
+
+    }
+
     function pruneDeadBridge(bridge, bid) {
       // if this bridge no longer had a bury flag
       if (!getStorage(getBridgeKeyName(bid))) {
@@ -2023,6 +2093,8 @@ SubEtha Message Bus (se-msg)
 
       // remove from bridges index
       bridgeIds.splice(bridgeIds.indexOf(bid), 1);
+
+      // deregister bridge
 
       // notify server that this bridge is gone
       server.fire('killed bridge', bridge);
@@ -2095,12 +2167,13 @@ SubEtha Message Bus (se-msg)
     function discardBridgePeers(peer, pid) {
       var
         server = this,
-        network = server.network
+        network = server.network,
+        channelName = peer.channel
       ;
       // remove from network clients
       network.clients.del(pid);
       // remove from network channel
-      network.channels.get(peer.channel).del(pid);
+      network.channels.get(channelName).del(pid);
 
       return pid;
     }
@@ -2124,8 +2197,15 @@ SubEtha Message Bus (se-msg)
         // remove server channel
         serverChannels.del(channelName);
         // remove network channel
-        server.network.channels.del(channelName);
+        server.network.channels.del(channelName)
+          // and it's channel peers
+          .each(removeNetworkClient, server.network.clients);
       }
+    }
+
+    // scope to network clients
+    function removeNetworkClient(client, id) {
+      this.del(id);
     }
 
     // delegate unload event
@@ -3132,8 +3212,10 @@ SubEtha Message Bus (se-msg)
               clientStamp
             ))
           ) {
-            // if there are other peers to inform
-            if (server.network.channels.branch(channelName).length) {
+            // if there are other bridges...
+            // we can't rely on network channel count
+            // it could remain empty
+            if (bridge.bridges.length) {
               payload = makePayloadForChannelRelay(server, 'join', client),
               payload.data.stamp = clientStamp;
               // notify network - use result to declare success
