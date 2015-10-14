@@ -1773,7 +1773,7 @@ SubEtha Message Bus (se-msg)
       var request = authRequests.del(authRequestId);
       if (request) {
         // flag as met, in case this request is still exposed
-        request.met;
+        request.met = 1;
         return request;
       }
     }
