@@ -2446,7 +2446,7 @@ SubEtha Message Bus (se-msg)
 
     function deliverMsgToHost(server, msg, relayRequests) {
       // send message to host
-      server.tell('message', msg);
+      server.tell('client', msg);
       // move on to next message
       doneDeliveringMsg(server, relayRequests);
     }
