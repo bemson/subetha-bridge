@@ -943,6 +943,10 @@ SubEtha Message Bus (se-msg)
             // if still dead (and not buried)...
             if (bridge) {
               cancelBridgeTimer(bridge);
+            } else if (server.bridges.has(bid)) {
+              // when an bridge dissappears...
+              // kill and remove now
+              killBridge(server, bid, 0, 1);
             }
           },
           // is regxp
@@ -2077,7 +2081,7 @@ SubEtha Message Bus (se-msg)
     }
 
     // remove from server
-    function killBridge(server, bid, when) {
+    function killBridge(server, bid, when, execnow) {
       var
         bridge = server.bridges.del(bid),
         deadPeers
@@ -2115,10 +2119,14 @@ SubEtha Message Bus (se-msg)
       }
 
       // schedule burying this bridge
-      bridge.timer = setTimeout(
-        buryBridge.bind(server, bid),
-        server._delay
-      );
+      if (execnow) {
+        removeBridgeEntries(bid);
+      } else {
+        bridge.timer = setTimeout(
+          buryBridge.bind(server, bid),
+          server._delay
+        );
+      }
 
     }
 
@@ -2672,7 +2680,7 @@ SubEtha Message Bus (se-msg)
           pid,
           bid
         ;
-        // exit if this channel is not registred...
+        // exit if this channel is not registered...
         if (!hasKey(registry, channelName)) {
           return;
         }
@@ -3323,7 +3331,7 @@ SubEtha Message Bus (se-msg)
         doneDeliveringMsg(server, relayRequests);
 
         return true;
-      },
+      }
 
     });
 
