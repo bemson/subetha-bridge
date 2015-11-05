@@ -366,30 +366,7 @@ SubEtha Message Bus (se-msg)
 
           // fork approach, based on platform
 
-          if (isIE10) {
-
-            _watch = function (me) {
-              var scanner = me.scan.bind(me);
-
-              // debounce storage event for 30ms
-              me.onstorage = function () {
-                clearTimeout(me.timer);
-                me.timer = setTimeout(scanner, 50);
-              };
-
-              // start interval to kick localStorage every 3 seconds
-              // this is for IE 10
-              // when the runtime doesn't receive a storage event
-              // and localStorage is out of sync
-              me.iv = setInterval(function () {
-                if (bridgeIds.length) {
-                  setStorage(ieKickKey, 1);
-                }
-              }, 3000);
-
-            };
-
-          } else if (isIE11) {
+          if (isIE11) {
 
             _watch = function (me) {
 
@@ -412,9 +389,9 @@ SubEtha Message Bus (se-msg)
                   key = e.key,
                   value = e.newValue
                 ;
-                // only observe keys that begin with this protocol
+                // only process keys that are...
                 if (!key.indexOf(protocolName)) {
-                  if (value === null || value === undefined) {
+                  if (typeof value != 'string') {
                     // if this is already cached
                     if (me.cache.has(key)) {
                       // notify removed key
@@ -428,7 +405,7 @@ SubEtha Message Bus (se-msg)
               };
 
               // listen to window storage events
-              // bind(scope, 'storage', me.onstorage);
+              bind(scope, 'storage', me.onstorage);
             };
 
           }
@@ -447,11 +424,6 @@ SubEtha Message Bus (se-msg)
 
             _watch(me);
 
-            if (!isIE11) {
-              // listen to window storage events
-              bind(scope, 'storage', me.onstorage);
-            }
-
           };
         })(),
 
@@ -462,17 +434,7 @@ SubEtha Message Bus (se-msg)
 
           // fork unwatch approach, based on platform
 
-          if (isIE10) {
-
-            _unwatch = function (me) {
-
-              clearTimeout(me.timer);
-              clearInterval(me.iv);
-              removeStorage(ieKickKey);
-
-            };
-
-          } else if (isIE11) {
+          if (isIE11) {
 
             _unwatch = function (me) {
               clearInterval(me.onstorage);
@@ -482,11 +444,10 @@ SubEtha Message Bus (se-msg)
 
             // w3c
 
-            _unwatch = noOp;
-            // _unwatch = function () {
-            //   // stop listening to window storage events
-            //   unbind(scope, 'storage', me.onstorage);
-            // };
+            _unwatch = function (me) {
+              // stop listening to window storage events
+              unbind(scope, 'storage', me.onstorage);
+            };
 
           }
 
@@ -499,11 +460,6 @@ SubEtha Message Bus (se-msg)
             me.watching = 0;
 
             _unwatch(me);
-
-            if (!isIE11) {
-              // stop listening to window storage events
-              unbind(scope, 'storage', me.onstorage);
-            }
 
             me.onstorage = 0;
 
@@ -844,7 +800,7 @@ SubEtha Message Bus (se-msg)
           <int>
         */
         [
-          isIE ?
+          isIE11 ?
             // ie - simply re-read all messages
             function (server, payload) {
               // capture target primary key
@@ -887,7 +843,7 @@ SubEtha Message Bus (se-msg)
         [
           (function () {
 
-            if (isIE) {
+            if (isIE11) {
               return sharedBehavior;
             }
 
@@ -1115,7 +1071,7 @@ SubEtha Message Bus (se-msg)
 
     // FORKS
 
-    if (isIE) {
+    if (isIE11) {
 
       // wait longest possible time based on order
       // presumes each bridge needs at least 100ms to respond
@@ -1470,6 +1426,9 @@ SubEtha Message Bus (se-msg)
       server.key =
       serverKey =
         getBridgeKeyName(serverId);
+      // cache server key length
+      // mainly used by ie11 to quicken testing storage events
+      server.keyLn = serverKey.length;
 
 
       // add self to global server ids
@@ -2225,12 +2184,22 @@ SubEtha Message Bus (se-msg)
     // handle storage key addition or update
     function handleStorageEvent(key, value) {
       var
-        storageCmds = (value === null || value === undefined) ? storageRemovalCmds : storageUpdateCmds,
-        ln = storageCmds.length,
+        me = this,
+        storageCmds,
+        ln,
         cmd,
         challenge,
         proceed
       ;
+
+      // ignore our own keys - needed for ie10
+      if (key.slice(0, me.keyLn) == me.key) {
+        return;
+      }
+
+      // determine which set of commands to scan
+      storageCmds = (value === undefined) ? storageRemovalCmds : storageUpdateCmds;
+      ln = storageCmds.length;
 
       // loop over local storage key matches
       while (ln--) {
@@ -2253,7 +2222,7 @@ SubEtha Message Bus (se-msg)
         // execute handler if key met the challenge
         if (proceed) {
           // passing proceed - which could be an array of matching sub-strings
-          cmd[0](this, value, proceed, key);
+          cmd[0](me, value, proceed, key);
           break;
         }
       }
@@ -2611,7 +2580,7 @@ SubEtha Message Bus (se-msg)
     mix(NetChannel.prototype, emitterPrototype);
     // load network
     // use browser-based approach
-    NetChannel.prototype.load = isIE ?
+    NetChannel.prototype.load = isIE11 ?
 
       // ie - cycle through peer keys
       function () {
@@ -2968,7 +2937,7 @@ SubEtha Message Bus (se-msg)
       },
 
       // update network via localStorage
-      relay: isIE ?
+      relay: isIE11 ?
         // sets given key to current date
         // the change will be discovered by other bridges
         // who will reconcile with IDB
@@ -3063,7 +3032,7 @@ SubEtha Message Bus (se-msg)
       },
 
       // capture network registry
-      regNet: isIE ?
+      regNet: isIE11 ?
         // ie doesn't use this approach
         // since it relies on storage events
         noOp :
@@ -3079,7 +3048,7 @@ SubEtha Message Bus (se-msg)
         },
 
       // set up keys
-      initKeys: isIE ?
+      initKeys: isIE11 ?
         function () {
           var server = this;
           // array of keys to eventually discard
@@ -3088,7 +3057,7 @@ SubEtha Message Bus (se-msg)
         noOp,
 
       // destroy keys
-      cleanKeys: isIE ?
+      cleanKeys: isIE11 ?
         function () {
           var
             keys = this.ckeys,
@@ -3183,7 +3152,7 @@ SubEtha Message Bus (se-msg)
         this.fire('error', type, msg);
       },
 
-      relayJoin: isIE ?
+      relayJoin: isIE11 ?
         // add key per joined client
         function (client, request) {
           // build key specific to this client
@@ -3233,7 +3202,7 @@ SubEtha Message Bus (se-msg)
           }
         },
 
-      relayDrop: isIE ?
+      relayDrop: isIE11 ?
         function (client) {
           // build key specific to this client
           var
