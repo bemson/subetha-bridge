@@ -105,7 +105,9 @@ SubEtha Message Bus (se-msg)
 
       isIE10 = /msie\s10/i.test(UA),
       isIE11 = !isIE10 && /trident/i.test(UA),
-      isIE = isIE10 || isIE11,
+      isIE12 = ~UA.indexOf(' Edge/12'),
+      ieAltKeyStrategy = isIE11 || isIE12,
+      isIE = isIE10 || ieAltKeyStrategy,
 
       // protocol & security
 
@@ -222,9 +224,6 @@ SubEtha Message Bus (se-msg)
           return me;
         }
       },
-      pageOrigin =
-        location.origin ||
-        location.protocol + '//' + (location.port ? location.port + ':' : '') + location.hostname,
       unsupported =
         // not in an iframe
         scope.parent === scope ||
@@ -359,113 +358,11 @@ SubEtha Message Bus (se-msg)
           systemBus.fire('ls-delete', key);
         },
 
-        // start watching local storage
-        watch: (function () {
-
-          var watch;
-
-          // fork approach, based on platform
-
-          if (isIE11) {
-
-            _watch = function (me) {
-
-              // just start looping now
-              me.onstorage = setInterval(function () {
-                // scan for changes
-                me.scan();
-              }, 200);
-
-            };
-
-          } else {
-
-            // w3c
-
-            _watch = function (me) {
-
-              me.onstorage = function (e) {
-                var
-                  key = e.key,
-                  value = e.newValue
-                ;
-                // only process keys that are...
-                if (!key.indexOf(protocolName)) {
-                  if (typeof value != 'string') {
-                    // if this is already cached
-                    if (me.cache.has(key)) {
-                      // notify removed key
-                      me.pop(key);
-                    }
-                  } else {
-                    // notify updated/added key
-                    me.push(key, value);
-                  }
-                }
-              };
-
-              // listen to window storage events
-              bind(scope, 'storage', me.onstorage);
-            };
-
-          }
-
-          return function watch() {
-            var me = this;
-
-            if (me.watching) {
-              return;
-            }
-            me.watching = 1;
-
-            // baseline scan of storage keys
-            // future changes will become custom events
-            me.scan();
-
-            _watch(me);
-
-          };
-        })(),
-
-        // stop watching local storage
-        unwatch: (function () {
-
-          var _unwatch;
-
-          // fork unwatch approach, based on platform
-
-          if (isIE11) {
-
-            _unwatch = function (me) {
-              clearInterval(me.onstorage);
-            };
-
-          } else {
-
-            // w3c
-
-            _unwatch = function (me) {
-              // stop listening to window storage events
-              unbind(scope, 'storage', me.onstorage);
-            };
-
-          }
-
-          return function unwatch() {
-            var me = this;
-
-            if (!me.watching) {
-              return;
-            }
-            me.watching = 0;
-
-            _unwatch(me);
-
-            me.onstorage = 0;
-
-          };
-
-        })(),
+        // these methods will be set later
+        // they depend on the host's origin
+        watch: 0,
+        // stubbed since destructor invokes this
+        unwatch: noOp,
 
         // reconcile storage values with cache
         // this is only used by IE, to assure the cache stays synced
@@ -800,7 +697,7 @@ SubEtha Message Bus (se-msg)
           <int>
         */
         [
-          isIE11 ?
+          ieAltKeyStrategy ?
             // ie - simply re-read all messages
             function (server, payload) {
               // capture target primary key
@@ -843,7 +740,7 @@ SubEtha Message Bus (se-msg)
         [
           (function () {
 
-            if (isIE11) {
+            if (ieAltKeyStrategy) {
               return sharedBehavior;
             }
 
@@ -1071,7 +968,7 @@ SubEtha Message Bus (se-msg)
 
     // FORKS
 
-    if (isIE11) {
+    if (ieAltKeyStrategy) {
 
       // wait longest possible time based on order
       // presumes each bridge needs at least 100ms to respond
@@ -1393,6 +1290,120 @@ SubEtha Message Bus (se-msg)
 
     // FUNCTIONS
 
+    // appends the watch and unwatch methods to LS utility
+    function completeLS(sameOrigin) {
+      var
+        kickLS = noOp,
+        _watch,
+        _unwatch
+      ;
+
+      // fork watch approach
+      // based on platform and origin
+      if (ieAltKeyStrategy) {
+
+        // determine if we also need to kick localStorage
+        if (isIE12 || (isIE11 && !sameOrigin)) {
+          kickLS = function () {
+            setStorage(ieKickKey, 1);
+            removeStorage(ieKickKey);
+          };
+        }
+
+        _watch = function (me) {
+
+          // just start looping now
+          me.onstorage = setInterval(function () {
+            // kick localStorage
+            kickLS();
+            // scan for changes
+            me.scan();
+          }, 500); // TODO: time should be dynamic
+
+        };
+
+      } else {
+
+        // w3c
+
+        _watch = function (me) {
+
+          me.onstorage = function (e) {
+            var
+              key = e.key,
+              value = e.newValue
+            ;
+            // only process events from this protcool...
+            if (!key.indexOf(protocolName)) {
+              if (typeof value != 'string') {
+                // if this is already cached
+                if (me.cache.has(key)) {
+                  // notify removed key
+                  me.pop(key);
+                }
+              } else {
+                // notify updated/added key
+                me.push(key, value);
+              }
+            }
+          };
+
+          // listen to window storage events
+          bind(scope, 'storage', me.onstorage);
+        };
+
+      }
+
+      LS.watch = function () {
+        // "me" is LS
+        var me = this;
+
+        if (me.watching) {
+          return;
+        }
+        me.watching = 1;
+
+        // baseline scan of storage keys
+        // future changes will become custom events
+        me.scan();
+
+        _watch(me);
+
+      };
+
+      // fork unwatch approach
+      // based on platform and origin
+      if (ieAltKeyStrategy) {
+
+        _unwatch = function (me) {
+          clearInterval(me.onstorage);
+        };
+
+      } else {
+
+        // w3c
+
+        _unwatch = function (me) {
+          // stop listening to window storage events
+          unbind(scope, 'storage', me.onstorage);
+        };
+
+      }
+
+      LS.unwatch = function() {
+        var me = this;
+
+        if (!me.watching) {
+          return;
+        }
+        me.watching = 0;
+
+        _unwatch(me);
+
+        me.onstorage = 0;
+
+      };
+    }
 
     // executes once DB connection has been established
     function completeServerInitialization() {
@@ -2580,7 +2591,7 @@ SubEtha Message Bus (se-msg)
     mix(NetChannel.prototype, emitterPrototype);
     // load network
     // use browser-based approach
-    NetChannel.prototype.load = isIE11 ?
+    NetChannel.prototype.load = ieAltKeyStrategy ?
 
       // ie - cycle through peer keys
       function () {
@@ -2763,6 +2774,7 @@ SubEtha Message Bus (se-msg)
       init: function (evt) {
         var
           server = this,
+          loc,
           payload,
           hostOrigin,
           hostNetwork
@@ -2804,23 +2816,38 @@ SubEtha Message Bus (se-msg)
           server.log('bad init event', evt);
           // prevent attempts to init twice
           server.destroy();
-          return;
-        }
 
-        // capture host origin
-        server.origin = hostOrigin;
-        // capture network
-        server.name = hostNetwork;
-
-        // if DB connection has been established...
-        if (sysReady) {
-          // complete initialization now
-          completeServerInitialization.call(server);
         } else {
-          // (otherwise) resume once system is ready
-          systemBus.on('sysRet', completeServerInitialization.bind(server));
-        }
 
+          // capture host origin
+          server.origin = hostOrigin;
+          // capture network
+          server.name = hostNetwork;
+
+          // complete initializing the LS object
+          if (!LS.watch) {
+            // alias for perf
+            loc = location;
+            // indicate when server is in same domain as host
+            completeLS(
+              hostOrigin ==
+              // resolve "location.origin"
+              (
+                loc.origin ||
+                loc.protocol + '//' + loc.hostname + (loc.port ? ':' + loc.port : '')
+              )
+            );
+          }
+
+          // if DB connection has been established...
+          if (sysReady) {
+            // complete initialization now
+            completeServerInitialization.call(server);
+          } else {
+            // (otherwise) resume once system is ready
+            systemBus.on('sysRet', completeServerInitialization.bind(server));
+          }
+        }
       },
 
       readMsgs: function (manager, index) {
@@ -2937,7 +2964,7 @@ SubEtha Message Bus (se-msg)
       },
 
       // update network via localStorage
-      relay: isIE11 ?
+      relay: ieAltKeyStrategy ?
         // sets given key to current date
         // the change will be discovered by other bridges
         // who will reconcile with IDB
@@ -3032,7 +3059,7 @@ SubEtha Message Bus (se-msg)
       },
 
       // capture network registry
-      regNet: isIE11 ?
+      regNet: ieAltKeyStrategy ?
         // ie doesn't use this approach
         // since it relies on storage events
         noOp :
@@ -3048,7 +3075,7 @@ SubEtha Message Bus (se-msg)
         },
 
       // set up keys
-      initKeys: isIE11 ?
+      initKeys: ieAltKeyStrategy ?
         function () {
           var server = this;
           // array of keys to eventually discard
@@ -3057,7 +3084,7 @@ SubEtha Message Bus (se-msg)
         noOp,
 
       // destroy keys
-      cleanKeys: isIE11 ?
+      cleanKeys: ieAltKeyStrategy ?
         function () {
           var
             keys = this.ckeys,
@@ -3152,7 +3179,7 @@ SubEtha Message Bus (se-msg)
         this.fire('error', type, msg);
       },
 
-      relayJoin: isIE11 ?
+      relayJoin: ieAltKeyStrategy ?
         // add key per joined client
         function (client, request) {
           // build key specific to this client
@@ -3202,7 +3229,7 @@ SubEtha Message Bus (se-msg)
           }
         },
 
-      relayDrop: isIE11 ?
+      relayDrop: ieAltKeyStrategy ?
         function (client) {
           // build key specific to this client
           var
