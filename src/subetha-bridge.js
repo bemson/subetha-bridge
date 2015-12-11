@@ -2265,11 +2265,17 @@ SubEtha Message Bus (se-msg)
 
       // ignore our own keys - needed for ie10
       if (key.slice(0, me.keyLn) == me.key) {
+        // kill self when our own key is removed
+        // this is mainly for ie, for when
+        // the bridge identifier is lost to localStorage I/O issues
+        if (!value) {
+          me.destroy();
+        }
         return;
       }
 
       // determine which set of commands to scan
-      storageCmds = (value === undefined) ? storageRemovalCmds : storageUpdateCmds;
+      storageCmds = (value) ? storageUpdateCmds : storageRemovalCmds;
       ln = storageCmds.length;
 
       // loop over local storage key matches
@@ -3220,9 +3226,6 @@ SubEtha Message Bus (se-msg)
         // stop listening to unload
         server.unrigUnload();
 
-        // detach all events
-        server.off();
-
         // remove various keys
         server.cleanKeys();
         // remove lingering bridge timers
@@ -3233,6 +3236,13 @@ SubEtha Message Bus (se-msg)
           // clean (shared) msg key
           LS.del(msgKey);
         }
+        // fire destroy event
+        // this is primarily for observing when a bridge destroys itself
+        // this event is not critical to anything, yet and may be removed
+        server.fire('destroyed');
+
+        // detach all events
+        server.off();
       },
 
       log: function (type, msg) {
