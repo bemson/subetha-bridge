@@ -245,6 +245,8 @@ SubEtha Message Bus (se-msg)
       w3cClientKey = protocolName + 'c',
       // key to get localStorage back in sync
       ieKickKey = protocolName + 'k',
+      // key to inform of localStorage changed keys
+      iePingKey = protocolName + 'p',
 
       // local storage entry point
       // one storage listener for all Server instances
@@ -289,22 +291,6 @@ SubEtha Message Bus (se-msg)
         has: function (key) {
           // check cache - NOT localstorage
           return this.cache.has(key);
-        },
-
-        set: function (key, value, isJSON) {
-          var
-            me = this,
-            cache = me.cache
-          ;
-          if (!isJSON) {
-            // make safe string
-            // before adding to cache and/or LS
-            value = JSONstringify(value);
-          }
-          // capture to cache
-          cache.set(key, value);
-          // set localStorage
-          setStorage(key, value);
         },
 
         // newValue is expected to be JSON
@@ -416,9 +402,9 @@ SubEtha Message Bus (se-msg)
             // get value (to set)
             value = getStorage(key);
 
-            // if value is null...
+            // if value is null, undefined, or an empty string...
             // ie will _set_ a null value when deleting keys
-            if (value === null || value === undefined) {
+            if (!value) {
               // announce removal now
               me.pop(key);
               // move on to next key
@@ -1290,34 +1276,108 @@ SubEtha Message Bus (se-msg)
 
     // FUNCTIONS
 
+    // synchronizes localStorage
+    // this is a hack that works sometimes
+    function kickLS() {
+      setStorage(ieKickKey, 1);
+      removeStorage(ieKickKey);
+    }
+
     // appends the watch and unwatch methods to LS utility
     function completeLS(sameOrigin) {
       var
-        kickLS = noOp,
+        kicker = noOp,
+        alsoKicking = isIE12 || (isIE11 && !sameOrigin),
+        updatePingKey = noOp,
+        lsREF = LS,
+        pingTick = 0,
         _watch,
         _unwatch
       ;
+
+      document.title = 'same origin? : ' + sameOrigin;
+
+      // add common LS setter method
+      lsREF.set = function (key, value, isJSON) {
+        var
+          me = this,
+          cache = me.cache
+        ;
+        if (!isJSON) {
+          // make safe string
+          // before adding to cache and/or LS
+          value = JSONstringify(value);
+        }
+        // capture to cache
+        cache.set(key, value);
+        // set localStorage
+        setStorage(key, value);
+        // update ping key - if appropriate
+        updatePingKey(me);
+      };
 
       // fork watch approach
       // based on platform and origin
       if (ieAltKeyStrategy) {
 
-        // determine if we also need to kick localStorage
-        if (isIE12 || (isIE11 && !sameOrigin)) {
-          kickLS = function () {
-            setStorage(ieKickKey, 1);
-            removeStorage(ieKickKey);
-          };
+        // determine if we also need to "kick" localStorage
+        if (alsoKicking) {
+          // use real kicker function
+          kicker = kickLS;
         }
+
+        // alter #set() to update ping key
+        updatePingKey = function (me) {
+          var pingValue = now();
+
+          // update ping key
+          // this tells other bridges to scan localStorage
+          setStorage(iePingKey, pingValue);
+          // cache to avoid scanning self
+          // me.pong = pingValue;
+        };
+
+        // add logic for pinging LS
+        mix(LS, {
+
+          // initial pinged value
+          pong: getStorage(iePingKey),
+
+          // check for changes to LS
+          // only used by altkey strategy
+          changed: function () {
+            var
+              me = this,
+              pong = me.pong,
+              ping = getStorage(iePingKey)
+            ;
+
+            me.pong = ping;
+
+            return ping != pong;
+          }
+
+        });
 
         _watch = function (me) {
 
           // just start looping now
           me.onstorage = setInterval(function () {
             // kick localStorage
-            kickLS();
-            // scan for changes
-            me.scan();
+            kicker();
+
+            // if not kicking regularly
+            // kick every so rounds
+            if (!alsoKicking && pingTick++ % 10 == 0) {
+              // this attempts to sync localStorage
+              // in case the ping key gets out of sync
+              kickLS();
+            }
+
+            // scan all when changed
+            if (me.changed()) {
+              me.scan();
+            }
           }, 500); // TODO: time should be dynamic
 
         };
@@ -1354,7 +1414,7 @@ SubEtha Message Bus (se-msg)
 
       }
 
-      LS.watch = function () {
+      lsREF.watch = function () {
         // "me" is LS
         var me = this;
 
@@ -1390,7 +1450,7 @@ SubEtha Message Bus (se-msg)
 
       }
 
-      LS.unwatch = function() {
+      lsREF.unwatch = function() {
         var me = this;
 
         if (!me.watching) {
